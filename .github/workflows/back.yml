@@ -1,13 +1,21 @@
-name: CI/CD
+name: Trendist Back Deploy
 
 on:
   push:
     branches: [ "main" ]
+    # 모노레포: back/ 또는 이 워크플로가 바뀔 때만 배포한다
+    paths:
+      - "back/**"
+      - ".github/workflows/back.yml"
 
 jobs:
   build:
     name: 🔧빌드
     runs-on: ubuntu-latest
+    # 체크아웃한 저장소의 back/에서 gradlew·docker compose를 실행한다
+    defaults:
+      run:
+        working-directory: back
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
