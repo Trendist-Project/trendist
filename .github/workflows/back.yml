@@ -9,8 +9,9 @@ on:
       - ".github/workflows/back.yml"
 
 jobs:
+  # 빌드·이미지 push·배포를 job 하나로 돈다(job마다 과금 분이 올림되므로)
   build:
-    name: 🔧빌드
+    name: 🔧빌드·🚀배포
     runs-on: ubuntu-latest
     # 체크아웃한 저장소의 back/에서 gradlew·docker compose를 실행한다
     defaults:
@@ -46,13 +47,10 @@ jobs:
           docker compose -f compose.build.yml build
           docker compose -f compose.build.yml push
 
-  server:
-    name: 🚀배포
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
       # ENV_FILE 시크릿이 비어 있으면 서버의 .env를 빈 파일로 덮어쓰게 되므로 배포를 멈춘다
+      # .env는 back/이 아닌 작업 공간 루트에 만든다(scp source ".env"가 루트 기준이라 서버에 back/.env로 가지 않게)
       - name: Write .env file to temporary file
+        working-directory: ${{ github.workspace }}
         run: |
           if [ -z "${{ secrets.ENV_FILE }}" ]; then
             echo "ENV_FILE 시크릿이 비어 있습니다"; exit 1
