@@ -1,0 +1,688 @@
+package com.trendist.seed;
+
+import com.trendist.common.code.CodeTables;
+import com.trendist.country.entity.Country;
+import com.trendist.country.repository.CountryRepository;
+import com.trendist.guide.entity.Guide;
+import com.trendist.guide.entity.GuideCategory;
+import com.trendist.guide.repository.GuideCategoryRepository;
+import com.trendist.guide.repository.GuideRepository;
+import com.trendist.keyword.entity.DataSource;
+import com.trendist.keyword.entity.KeywordState;
+import com.trendist.keyword.repository.DataSourceRepository;
+import com.trendist.keyword.repository.KeywordStateRepository;
+import com.trendist.player.entity.Level;
+import com.trendist.player.repository.LevelRepository;
+import com.trendist.report.entity.ReportType;
+import com.trendist.report.repository.ReportTypeRepository;
+import com.trendist.setting.entity.Setting;
+import com.trendist.setting.entity.SettingGroup;
+import com.trendist.setting.repository.SettingGroupRepository;
+import com.trendist.setting.repository.SettingRepository;
+import com.trendist.setting.support.SettingKeys;
+import com.trendist.effect.entity.Effect;
+import com.trendist.effect.entity.EffectType;
+import com.trendist.effect.repository.EffectRepository;
+import com.trendist.effect.repository.EffectTypeRepository;
+import com.trendist.title.entity.Title;
+import com.trendist.title.repository.TitleRepository;
+import com.trendist.user.entity.User;
+import com.trendist.user.entity.SanctionType;
+import com.trendist.user.repository.SanctionTypeRepository;
+import com.trendist.user.entity.UserState;
+import com.trendist.user.repository.UserRepository;
+import com.trendist.user.repository.UserStateRepository;
+import java.math.BigDecimal;
+import java.util.List;
+import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * 시작할 때마다 초기 데이터를 채운다(11.3).
+ * 코드가 이름으로 찾는 테이블은 없는 행만, 운영에서 고치는 테이블(titles, guide_categories, guides)은 비어 있을 때만 넣는다.
+ */
+@Component
+@Order(0)
+@RequiredArgsConstructor
+public class DataSeeder implements ApplicationRunner {
+    private static final Logger log = LoggerFactory.getLogger(DataSeeder.class);
+
+    private final CountryRepository countries;
+    private final UserStateRepository userStates;
+    private final KeywordStateRepository keywordStates;
+    private final ReportTypeRepository reportTypes;
+    private final SanctionTypeRepository sanctionTypes;
+    private final DataSourceRepository dataSources;
+    private final SettingRepository settings;
+    private final SettingGroupRepository settingGroups;
+    private final LevelRepository levels;
+    private final TitleRepository titles;
+    private final com.trendist.skill.repository.SkillRepository skills;
+    private final EffectRepository effects;
+    private final EffectTypeRepository effectTypes;
+    private final GuideCategoryRepository guideCategories;
+    private final GuideRepository guides;
+    private final UserRepository users;
+    private final CodeTables codeTables;
+    private final com.trendist.keybinding.service.KeybindingSeeder keybindingSeeder;
+    private final com.trendist.monster.service.MonsterSeeder monsterSeeder;
+
+    @Override
+    @Transactional
+    public void run(ApplicationArguments args) {
+        int added = 0;
+        // ID가 번역 키가 되는 테이블은 순서를 고정한다
+        for (String n : List.of(CodeTables.USER_NORMAL, CodeTables.USER_WITHDRAWN)) {
+            if (userStates.findByName(n).isEmpty()) { userStates.save(new UserState(n)); added++; }
+        }
+        for (String n : List.of(CodeTables.KW_ACTIVE, CodeTables.KW_INACTIVE, CodeTables.KW_BANNED)) {
+            if (keywordStates.findByName(n).isEmpty()) { keywordStates.save(new KeywordState(n)); added++; }
+        }
+        for (String n : ReportType.ALL) {
+            if (reportTypes.findByName(n).isEmpty()) { reportTypes.save(new ReportType(n)); added++; }
+        }
+        for (String n : SanctionType.ALL) {
+            if (sanctionTypes.findByName(n).isEmpty()) { sanctionTypes.save(new SanctionType(n)); added++; }
+        }
+        record C(String code, String name, String locale, String tz, boolean enabled, int order) {}
+        for (C c : List.of(
+                new C("KR", "한국", "ko", "Asia/Seoul", true, 1),
+                new C("GLOBAL", "글로벌", "en", "UTC", true, 2),
+                new C("JP", "일본", "ja", "Asia/Tokyo", false, 3),
+                new C("IN", "인도", "hi", "Asia/Kolkata", false, 4),
+                new C("CN", "중국", "zh-CN", "Asia/Shanghai", false, 5))) {
+            if (countries.findByCode(c.code()).isEmpty()) {
+                countries.save(new Country(c.code(), c.name(), c.locale(), c.tz(), c.enabled(), c.order()));
+                added++;
+            }
+        }
+        // 반영값은 모두 1(10.3)
+        for (String name : List.of(DataSource.GOOGLE, DataSource.ADMIN, DataSource.INTERNAL)) {
+            if (dataSources.findByName(name).isEmpty()) {
+                dataSources.save(new DataSource(name, BigDecimal.ONE));
+                added++;
+            }
+        }
+        // 더 이상 쓰지 않는 설정(콤보 궤도 위성 4.25, 지름 비율 4.2, 갈고리·충격파 반지름 배수 4.33)은 DB에서 지운다. 관리자 화면에 옛 설정으로 계속 남지 않게 한다
+        for (String old : List.of("combo_orbit_at", "orbit_interval_seconds", "orbit_max", "max_diameter_ratio", "leaderboard_size", "hook_range_ratio", "shockwave_range_ratio")) {
+            settings.findByName(old).ifPresent(settings::delete);
+        }
+        // 최소·최대 크기는 지름이 아니라 반지름으로 둔다(4.2): 옛 지름 설정은 값을 절반으로 옮기며 이름을 바꾼다(아래 설정 만들기에서 옮긴 값을 쓴다)
+        java.util.Map<String, String> carried = new java.util.HashMap<>();
+        for (String[] pair : new String[][]{{"min_diameter", "min_radius"}, {"max_diameter", "max_radius"}}) {
+            settings.findByName(pair[0]).ifPresent(o -> {
+                if (settings.findByName(pair[1]).isEmpty()) {
+                    try { carried.put(pair[1], new BigDecimal(o.getValue().trim()).divide(BigDecimal.valueOf(2)).stripTrailingZeros().toPlainString()); }
+                    catch (NumberFormatException ignored) { /* 값이 이상하면 기본값을 쓴다 */ }
+                }
+                settings.delete(o);
+            });
+        }
+        // 설정 그룹(13.3): 이름과 순서는 코드(SettingKeys.GROUP_ORDER)가 정한다. 설정이 외래 키로 가리키므로 설정보다 먼저 만든다
+        java.util.Map<String, SettingGroup> groupByName = new java.util.HashMap<>();
+        for (int i = 0; i < SettingKeys.GROUP_ORDER.size(); i++) {
+            String name = SettingKeys.GROUP_ORDER.get(i);
+            SettingGroup g = settingGroups.findByName(name).orElse(null);
+            if (g == null) { g = settingGroups.save(new SettingGroup(name, i + 1)); added++; }
+            else if (g.getSortOrder() != i + 1) { g.changeSortOrder(i + 1); settingGroups.save(g); }
+            groupByName.put(name, g);
+        }
+        for (SettingKeys.Def d : SettingKeys.DEFAULTS) {
+            SettingGroup group = groupByName.get(SettingKeys.groupOf(d.name()));
+            String unit = SettingKeys.unitOf(d.name());
+            long order = SettingKeys.sortOrderOf(d.name());
+            String value = carried.getOrDefault(d.name(), d.value());
+            String type = value.contains(".") ? "DECIMAL" : "INT";
+            Setting s = settings.findByName(d.name()).orElse(null);
+            if (s == null) {
+                settings.save(new Setting(d.name(), value, type, BigDecimal.valueOf(d.min()), BigDecimal.valueOf(d.max()), d.description(), unit, group, order));
+                added++;
+            } else {
+                boolean changed = false;
+                // 설명·값 형식·단위·그룹·화면 순서는 코드가 정한다(관리자 화면에 보이는 뜻이 바뀐 규칙과 맞게, 정수였던 값이 소수가 되는 경우)
+                if (!d.description().equals(s.getDescription())) { s.changeDescription(d.description()); changed = true; }
+                if (!type.equals(s.getValueType())) { s.changeValueType(type); changed = true; }
+                if (!java.util.Objects.equals(unit, s.getUnit())) { s.changeUnit(unit); changed = true; }
+                if (!group.getId().equals(s.getGroup().getId())) { s.changeGroup(group); changed = true; }
+                if (s.getSortOrder() != order) { s.changeSortOrder(order); changed = true; }
+                if (changed) settings.save(s);
+            }
+        }
+        if (levels.count() < 100) {
+            var existing = levels.findAllByOrderByLevelAsc().stream().map(Level::getLevel).toList();
+            for (int lv = 1; lv <= 100; lv++) {
+                if (!existing.contains((long) lv)) { levels.save(new Level(lv, defaultRequiredExp(lv))); added++; }
+            }
+        }
+        // 레벨 표시 옆 아이콘 바탕(4.9): 값을 한 번도 넣지 않은 행(badge_alpha가 null)에만 기본 규칙으로 채운다. 그 뒤 운영에서 고친 값은 건드리지 않는다
+        for (Level l : levels.findAllByOrderByLevelAsc()) {
+            if (l.getBadgeAlpha() != null) continue;
+            String[] b = badgeFor((int) l.getLevel());
+            l.applyBadge(b[0], Long.parseLong(b[1]), "RAINBOW".equals(b[2]));
+            levels.save(l);
+            added++;
+        }
+        added += seedTitles();
+        added += seedSkills();
+        // 효과 종류와 효과(4.9, 4.23): 그림이 코드에 있으므로 코드에 있는데 DB에 없는 것만 넣는다(이름·조건·순서는 운영에서 고친다)
+        for (String[] t : EFFECT_TYPES) {
+            if (effectTypes.findByCode(t[0]).isEmpty()) { effectTypes.save(new EffectType(t[0], t[1])); added++; }
+        }
+        for (var entry : java.util.Map.of(EffectType.TRAIL, TRAIL_EFFECTS, EffectType.BORDER, BORDER_EFFECTS).entrySet()) {
+            EffectType type = effectTypes.findByCode(entry.getKey()).orElseThrow();
+            String[][] list = entry.getValue();
+            for (int i = 0; i < list.length; i++) {
+                if (effects.findByTypeAndCode(entry.getKey(), list[i][0]).isEmpty()) {
+                    effects.save(new Effect(type, list[i][0], list[i][1], i + 1));
+                    added++;
+                }
+            }
+        }
+        codeTables.clear();
+        added += seedGuides();
+        added += keybindingSeeder.seed(); // 키 바인딩 목록: 키·동작(4.33)
+        added += monsterSeeder.seed(); // 몬스터 종류와 설정값(4.35)
+        log.info("seed done, {} rows added", added);
+    }
+
+    /**
+     * 가이드 카테고리와 글(4.17). 운영에서 고치는 데이터라 각 테이블이 비어 있을 때만 넣는다.
+     */
+    private int seedGuides() {
+        int added = 0;
+        if (guideCategories.count() == 0) {
+            int order = 1;
+            for (GuideSeed.Category c : GuideSeed.CATEGORIES) {
+                guideCategories.save(new GuideCategory(c.code(), c.name(), c.displayType(), order++));
+                added++;
+            }
+        }
+        if (guides.count() == 0) added += insertGuideArticles();
+        added += insertAddedGuideCategories();
+        added += insertAddedGuideArticles();
+        added += applyGuideFixes();
+        added += syncGuideVersions();
+        return added;
+    }
+
+    /** 시드 본문(한·영)의 해시. 줄바꿈·앞뒤 공백 차이는 같게 본다 */
+    static String seedHash(String body, String bodyEn) {
+        try {
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest((norm(body) + "\u0000" + norm(bodyEn)).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(d);
+        } catch (java.security.NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+    }
+
+    /** 시드 글 하나: 카테고리 코드·제목·한영 본문 */
+    record SeedArticle(String categoryCode, String title, String body, String bodyEn) {}
+
+    static List<SeedArticle> seedArticles() {
+        List<SeedArticle> out = new java.util.ArrayList<>();
+        for (int ci = 0; ci < GuideSeed.CATEGORIES.size(); ci++) {
+            GuideSeed.Category c = GuideSeed.CATEGORIES.get(ci);
+            for (int ai = 0; ai < c.articles().size(); ai++)
+                out.add(new SeedArticle(c.code(), c.articles().get(ai).title(), c.articles().get(ai).body(), EnglishSeed.GUIDE.get(ci).articles().get(ai).bodyEn()));
+        }
+        for (GuideSeed.Added a : GuideSeed.ADDED) out.add(new SeedArticle(a.categoryCode(), a.title(), a.body(), a.bodyEn()));
+        return out;
+    }
+
+    /**
+     * 시드 글을 판 번호(GuideSeed.VERSIONS)로 맞춘다(4.17).
+     * - 판 번호가 아직 없는 행(이 방식 이전): 본문이 지금 시드와 같으면 그 판·해시를 적고, 다르면(관리자가 고친 글) 판만 적고 해시는 비워 앞으로 건드리지 않는다.
+     * - 판 번호가 코드보다 낮은 행: 본문 해시가 시더가 마지막으로 넣은 해시와 같을 때만 새 본문으로 바꾸고, 어느 쪽이든 판을 올린다.
+     * 지운 글도 판만 맞춘다(되살리지 않는다).
+     */
+    int syncGuideVersions() {
+        int n = 0;
+        java.util.Map<String, Long> categoryIds = new java.util.HashMap<>();
+        for (SeedArticle a : seedArticles()) {
+            Long cid = categoryIds.computeIfAbsent(a.categoryCode(), code -> guideCategories.findByCodeAndEnabledTrue(code).map(GuideCategory::getId).orElse(-1L));
+            if (cid < 0) continue;
+            int version = GuideSeed.version(a.categoryCode(), a.title());
+            String fresh = seedHash(a.body(), a.bodyEn());
+            for (Guide g : guides.findByGuideCategoryId(cid)) {
+                if (!g.getTitle().equals(a.title())) continue;
+                String now = seedHash(g.getBody(), g.getBodyEn());
+                if (g.getSeedVersion() == null) {
+                    g.markSeed(version, now.equals(fresh) ? fresh : null);
+                } else if (g.getSeedVersion() < version) {
+                    if (now.equals(g.getSeedHash()) && g.getDeletedAt() == null) {
+                        g.changeBody(a.body());
+                        g.changeEnglish(g.getTitleEn(), a.bodyEn());
+                        g.markSeed(version, fresh);
+                        n++;
+                    } else {
+                        g.markSeed(version, g.getSeedHash());
+                    }
+                }
+            }
+        }
+        return n;
+    }
+
+    /** 나중에 더한 카테고리(GuideSeed.ADDED_CATEGORIES): 같은 코드가 없을 때만, afterCode 카테고리 바로 뒤에 끼워 넣는다(뒤 카테고리는 순서를 하나씩 민다) */
+    private int insertAddedGuideCategories() {
+        int added = 0;
+        for (GuideSeed.AddedCategory c : GuideSeed.ADDED_CATEGORIES) {
+            if (guideCategories.existsByCode(c.code())) continue;
+            List<GuideCategory> all = guideCategories.findAllByOrderBySortOrderAscIdAsc();
+            GuideCategory after = all.stream().filter(x -> x.getCode().equals(c.afterCode())).findFirst().orElse(null);
+            long at = after != null ? after.getSortOrder() + 1 : all.stream().mapToLong(GuideCategory::getSortOrder).max().orElse(0) + 1;
+            for (GuideCategory x : all) if (x.getSortOrder() >= at) x.changeSortOrder(x.getSortOrder() + 1);
+            GuideCategory created = new GuideCategory(c.code(), c.name(), c.displayType(), (int) at);
+            created.changeNameEn(c.nameEn());
+            guideCategories.save(created);
+            added++;
+        }
+        return added;
+    }
+
+    private static String norm(String s) { return s == null ? "" : s.replace("\r\n", "\n").trim(); }
+
+    /**
+     * 가이드 글 고치기(GuideSeed.FIXES): DB의 본문이 처음 시드 그대로일 때만 새 본문(CATEGORIES·EnglishSeed의 같은 제목 글)으로 바꾼다. 영어도 함께.
+     * 관리자가 고친 글은 건드리지 않는다.
+     */
+    private int applyGuideFixes() {
+        int n = 0;
+        for (GuideSeed.Fix fix : GuideSeed.FIXES) {
+            GuideCategory category = guideCategories.findByCodeAndEnabledTrue(fix.categoryCode()).orElse(null);
+            if (category == null) continue;
+            int ci = -1;
+            for (int i = 0; i < GuideSeed.CATEGORIES.size(); i++) if (GuideSeed.CATEGORIES.get(i).code().equals(fix.categoryCode())) ci = i;
+            if (ci < 0) continue;
+            GuideSeed.Category koCat = GuideSeed.CATEGORIES.get(ci);
+            int ai = -1;
+            for (int i = 0; i < koCat.articles().size(); i++) if (koCat.articles().get(i).title().equals(fix.title())) ai = i;
+            if (ai < 0) continue;
+            String newBody = koCat.articles().get(ai).body();
+            String newBodyEn = EnglishSeed.GUIDE.get(ci).articles().get(ai).bodyEn();
+            for (com.trendist.guide.entity.Guide g : guides.findByGuideCategoryId(category.getId())) {
+                if (!plainTitle(g.getTitle()).equals(plainTitle(fix.title())) || !norm(g.getBody()).equals(norm(fix.oldBody()))) continue;
+                g.changeBody(newBody);
+                g.changeEnglish(g.getTitleEn(), newBodyEn);
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** 나중에 더한 글(GuideSeed.ADDED): 같은 카테고리에 같은 제목이 없을 때만 맨 뒤에 한 번 넣는다. 영어도 함께 넣는다 */
+    private int insertAddedGuideArticles() {
+        int added = 0;
+        User author = null;
+        for (GuideSeed.Added a : GuideSeed.ADDED) {
+            GuideCategory category = guideCategories.findByCodeAndEnabledTrue(a.categoryCode()).orElse(null);
+            if (category == null) continue;
+            List<com.trendist.guide.entity.Guide> existing = guides.findByGuideCategoryId(category.getId());
+            if (existing.stream().anyMatch(g -> g.getTitle().equals(a.title()))) continue;
+            if (author == null) author = operator();
+            int next = existing.stream().mapToInt(g -> (int) g.getSortOrder()).max().orElse(0) + 1;
+            com.trendist.guide.entity.Guide g = new com.trendist.guide.entity.Guide(category, author, a.title(), a.body(), next);
+            g.changeEnglish(a.titleEn(), a.bodyEn());
+            guides.save(g);
+            added++;
+        }
+        return added + applyAddedGuideFixes();
+    }
+
+    /**
+     * 나중에 더한 글(GuideSeed.ADDED) 고치기(GuideSeedOld.FIXES): DB의 본문이 그 글의 예전 시드 그대로일 때만 새 본문(영어 포함)으로 바꾼다.
+     * 관리자가 이미 고친 글은 건드리지 않는다. 새 글은 위에서 같은 제목이 없을 때 이미 넣었다.
+     */
+    /** 제목 앞의 이모지·기호·공백을 뗀 제목. 스킬 글 제목에서 이모지를 뺐으므로(V74) 예전 이모지 제목과 새 제목이 같은 글로 맞는다 */
+    static String plainTitle(String t) { return t.replaceFirst("^[^\\p{L}\\p{N}]+", ""); }
+
+    private int applyAddedGuideFixes() {
+        int n = 0;
+        for (GuideSeed.Fix fix : GuideSeedOld.FIXES) {
+            GuideSeed.Added fresh = GuideSeed.ADDED.stream()
+                    .filter(a -> a.categoryCode().equals(fix.categoryCode()) && plainTitle(a.title()).equals(plainTitle(fix.title()))).findFirst().orElse(null);
+            GuideCategory category = guideCategories.findByCodeAndEnabledTrue(fix.categoryCode()).orElse(null);
+            if (fresh == null || category == null) continue;
+            for (com.trendist.guide.entity.Guide g : guides.findByGuideCategoryId(category.getId())) {
+                if (!plainTitle(g.getTitle()).equals(plainTitle(fix.title())) || !norm(g.getBody()).equals(norm(fix.oldBody()))) continue;
+                g.changeBody(fresh.body());
+                g.changeEnglish(g.getTitleEn(), fresh.bodyEn());
+                n++;
+            }
+        }
+        return n;
+    }
+
+    private int insertGuideArticles() {
+        int added = 0;
+        User author = operator();
+        for (GuideSeed.Category c : GuideSeed.CATEGORIES) {
+            GuideCategory category = guideCategories.findByCodeAndEnabledTrue(c.code()).orElse(null);
+            if (category == null) continue; // 관리자가 지우거나 끈 카테고리
+            int order = 1;
+            for (GuideSeed.Article a : c.articles()) {
+                guides.save(new Guide(category, author, a.title(), a.body(), order++)); // 영어는 EnglishBackfill, 판 번호는 syncGuideVersions가 채운다
+                added++;
+            }
+        }
+        return added;
+    }
+
+    /** 공지·가이드 작성자로 쓰는 운영자 계정. 없으면 만든다. */
+    private User operator() {
+        return users.findFirstByRoleOrderByIdAsc(User.ROLE_ADMIN)
+                .orElseGet(() -> users.save(User.operator(userStates.findByName(CodeTables.USER_NORMAL).orElseThrow())));
+    }
+
+    /** 10레벨 구간별 바탕색(11~19, 20~29, … 90~99레벨) */
+    private static final String[] BADGE_BAND_COLORS = {
+            "#4f8cff", "#26c6da", "#66bb6a", "#d4e157", "#ffca28", "#ff9800", "#ef5350", "#ec407a", "#ab47bc"};
+
+    /**
+     * 레벨 표시 옆 성장 아이콘 바탕의 기본값(4.9) → {색, 진하기(%), 종류(SOLID/RAINBOW)}.
+     * 1~10레벨은 기본 거북이 색(null), 11레벨부터는 10레벨 구간마다 색이 바뀌고 일의 자리가 0에서 9로 갈수록 옅은 색에서 진한 색(30~100%),
+     * 100레벨은 무지개 그라데이션이다. 시드 값일 뿐이고 실제 값은 levels 테이블에서 관리한다.
+     */
+    static String[] badgeFor(int level) {
+        if (level <= 10) return new String[]{null, "100", "SOLID"};
+        if (level >= 100) return new String[]{null, "100", "RAINBOW"};
+        String color = BADGE_BAND_COLORS[level / 10 - 1];
+        long alpha = 30 + Math.round((level % 10) * 70 / 9.0);
+        return new String[]{color, String.valueOf(alpha), "SOLID"};
+    }
+
+    /**
+     * 4.9의 기본 곡선: 그 레벨이 되는 데 필요한 EXP(앞 레벨에서 올라올 때, 누적 아님, 1레벨은 0). 2~10레벨은 표, 11~100레벨은 100 × (레벨/10)².
+     * 그래서 100레벨은 99레벨에서 EXP 0부터 10,000을 모아야 한다.
+     */
+    static long defaultRequiredExp(int level) {
+        long[] early = {0, 0, 1, 3, 8, 13, 22, 33, 50, 72, 100};
+        if (level <= 10) return early[level];
+        return Math.round(100 * Math.pow(level / 10.0, 2));
+    }
+
+    /**
+     * 칭호(4.10). 운영에서 고치는 데이터라 테이블이 비어 있을 때만 넣는다(관리자가 지운 것이 되살아나지 않게).
+     * 칭호 ID는 번역 키라서 넣는 순서를 고정한다: TITLES(1~22) 다음에 MORE_TITLES(23~51). 표시 순서(sort_order)는 TITLE_ORDER의 순서 × 10.
+     */
+    private int seedTitles() {
+        int added = 0;
+        if (titles.count() == 0) {
+            for (String[][] list : List.of(TITLES, MORE_TITLES)) {
+                for (String[] t : list) { titles.save(new Title(t[0], t[1], t[2], t[3], titleOrder(t[0]))); added++; }
+            }
+        }
+        // 죽인 횟수 칭호(4.31): 나중에 추가했으므로 이미 있는 DB에도 한 번 넣는다. 죽인 횟수 칭호가 하나라도 있으면(관리자가 이름을 바꾸거나 지운 경우 포함) 다시 넣지 않는다
+        if (titles.findAll().stream().noneMatch(t -> t.getConditionParams().contains("kill_count"))) {
+            for (String[] t : KILL_TITLES) { titles.save(new Title(t[0], t[1], t[2], t[3], titleOrder(t[0]))); added++; }
+        }
+        // 패배 횟수 칭호(4.31)도 같은 방식으로 한 번 넣는다
+        if (titles.findAll().stream().noneMatch(t -> t.getConditionParams().contains("death_count"))) {
+            for (String[] t : DEFEAT_TITLES) { titles.save(new Title(t[0], t[1], t[2], t[3], titleOrder(t[0]))); added++; }
+        }
+        // 콤보 칭호(4.10, 4.25): 최고 콤보·불꽃 끈 횟수. 같은 방식으로 한 번 넣는다
+        if (titles.findAll().stream().noneMatch(t -> t.getConditionParams().contains("max_combo"))) {
+            for (String[] t : COMBO_TITLES) { titles.save(new Title(t[0], t[1], t[2], t[3], titleOrder(t[0]))); added++; }
+        }
+        if (titles.findAll().stream().noneMatch(t -> t.getConditionParams().contains("flame_out_count"))) {
+            for (String[] t : FLAME_OUT_TITLES) { titles.save(new Title(t[0], t[1], t[2], t[3], titleOrder(t[0]))); added++; }
+        }
+        // 나중에 더한 콤보 칭호: 같은 조건(metric·값)의 칭호가 없을 때만 넣는다(이미 만든 DB에도 한 번 들어간다)
+        for (String[] t : COMBO_EXTRA_TITLES) {
+            if (titles.findAll().stream().noneMatch(x -> x.getName().equals(t[0]) || sameCondition(x.getConditionParams(), t[3]))) { titles.save(new Title(t[0], t[1], t[2], t[3], titleOrder(t[0]))); added++; }
+        }
+        // 보스 처치 참여 횟수 칭호(4.35): 나중에 더했으므로 같은 조건의 칭호가 없을 때만 한 번 넣는다
+        for (String[] t : BOSS_TITLES) {
+            if (titles.findAll().stream().noneMatch(x -> x.getName().equals(t[0]) || sameCondition(x.getConditionParams(), t[3]))) { titles.save(new Title(t[0], t[1], t[2], t[3], titleOrder(t[0]))); added++; }
+        }
+        // 유행도가 같은 상대와 부딪힌 횟수 칭호(4.3): 나중에 더했으므로 같은 조건의 칭호가 없을 때만 한 번 넣는다
+        for (String[] t : TIE_TITLES) {
+            if (titles.findAll().stream().noneMatch(x -> x.getName().equals(t[0]) || sameCondition(x.getConditionParams(), t[3]))) { titles.save(new Title(t[0], t[1], t[2], t[3], titleOrder(t[0]))); added++; }
+        }
+        return added;
+    }
+
+    private static final java.util.regex.Pattern METRIC_COND = java.util.regex.Pattern.compile("\"metric\"\\s*:\\s*\"([a-z_]+)\"");
+    private static final java.util.regex.Pattern GTE_COND = java.util.regex.Pattern.compile("\"gte\"\\s*:\\s*(\\d+)");
+
+    /** 두 칭호 조건(JSON)이 같은 metric·값인지. DB가 JSON의 공백·키 순서를 바꿔 저장해도 같게 본다. */
+    private static boolean sameCondition(String a, String b) {
+        var ma = METRIC_COND.matcher(a); var mb = METRIC_COND.matcher(b);
+        var ga = GTE_COND.matcher(a); var gb = GTE_COND.matcher(b);
+        return ma.find() && mb.find() && ga.find() && gb.find() && ma.group(1).equals(mb.group(1)) && ga.group(1).equals(gb.group(1));
+    }
+
+    /**
+     * 스킬(4.33): 코드가 있는데 DB에 없는 스킬을 채우고, 이미 있는 스킬은 목록 순서만 코드(배열 순서, 대시가 맨 앞)와 맞춘다(운영에서 고친 쿨타임·기본 키는 건드리지 않는다). 스킬을 늘릴 때는 여기에 한 줄을 더하거나 DB에 행을 넣고,
+     * 동작은 Room.SKILLS와 Room.skill에, 이름·설명은 프론트엔드 번역 파일(skills.<코드>_name·_desc)에 더한다. 기본 단축키는 KeyboardEvent.code(Space, Digit1, KeyQ …).
+     * 종류: ATTACK(직접 키워드를 빼앗거나 잃게 함) / DEFENSE(밀어내기·보호) / CC(이동·시야를 막는 방해: 암흑·스턴·슬로우) / UTILITY(대시·은신·회복·정화).
+     * 필드: 코드, 종류, 기본 키, 쿨타임(초), 해금 레벨(1 = 기본 스킬). 아이콘은 프론트엔드의 직접 그린 SVG(`SkillIcon`)라 DB에 두지 않는다(V73).
+     */
+    private static final String[][] SKILL_ROWS = {
+            {"dash", "UTILITY", "Space", "10", "1"},         // 기본 스킬. 목록 순서의 맨 앞(순서는 이 배열 순서, 이후는 해금 레벨 순서)
+            {"invincibility", "DEFENSE", "Digit1", "30", "4"},   // 방어: 첫 생존 수단
+            {"hook", "ATTACK", "Digit2", "30", "7"},     // 공격: 첫 빼앗기 수단
+            {"slow", "CC", "Digit3", "30", "10"},         // CC: 가장 약한 CC. 이동 속도 50%↓ 3초, 겹침(최대 3겹)
+            {"stealth", "UTILITY", "Digit4", "30", "13"}, // 유틸: 여기까지 4칸이 방어·공격·CC·유틸로 완성된다
+            {"repel", "DEFENSE", "Digit5", "30", "16"}, // 방어: 반발(밀어내기)
+            {"fortify", "DEFENSE", "Digit6", "30", "19"},  // 방어: 피해 감소. 10초 버프, 받는 체력 피해 절반(다른 스킬과 함께 쓴다)
+            {"cleanse", "UTILITY", "Digit7", "30", "22"}, // 유틸: 뒤에 나오는 CC·독의 카운터를 먼저 준다
+            {"darkness", "CC", "Digit8", "30", "25"},     // CC: 시야만 가린다
+            {"root", "CC", "Digit9", "30", "28"},          // CC: 속박. 겨눈 상대를 잠시 묶는다
+            {"heal", "UTILITY", "Digit0", "60", "31"},    // 유틸: 체력을 채우는 스킬(회복량은 설정 skill_heal_percent)
+            {"poison", "ATTACK", "", "30", "34"},   // 공격: 지속 피해(정화로 해제)
+            {"barrier", "DEFENSE", "", "30", "37"},  // 방어: 보호막. 10초, 최대 체력의 50%를 체력 위에 쌓는다(피해는 보호막부터)
+            {"stun", "CC", "", "30", "40"},         // CC: 1초 동안 움직이지도 스킬을 쓰지도 못함(가장 강한 CC)
+            {"silence", "CC", "", "30", "43"},       // CC: 침묵. 3초 동안 스킬을 쓰지 못한다
+            {"quake", "ATTACK", "", "30", "46"},      // 공격: 충격파. 범위 안 원이 키워드 3개를 잃음(피할 수 있다)
+            {"confuse", "CC", "", "30", "49"},      // CC: 혼란. 이동 방향이 뒤틀린다
+            {"fireball", "ATTACK", "", "30", "52"},      // 공격: 화염구. 확정 타겟팅 3발, 키워드 3개를 잃음(피할 수 없다)
+            {"amplify", "ATTACK", "", "30", "55"},   // 공격: 공격 증폭. 10초 버프, 주는 체력 피해 2배
+            {"absorb", "ATTACK", "", "30", "58"},     // 공격: 흡수. 사거리 안 모든 원에게서 3개씩 빼앗음(가장 강하다)
+            {"zone", "ATTACK", "", "30", "64"},       // 공격: 장판. 쓴 자리에 3초 장판, 위에 있으면 0·1·2초에 10%씩(총 30%)
+            {"burst", "ATTACK", "", "30", "67"},      // 공격: 터지는 총알. 맞으면 10%, 2초 뒤 터져 10%와 무작위 방향 튕김
+            {"berserk", "ATTACK", "", "1", "70"},   // 공격: 광폭화. 켜고 끄는 스킬(켜고 끄는 쿨타임 1초), 잃은 체력만큼 유행도 배율·이동 속도 증가(가장 마지막 해금: 장판 64·터지는 총알 67보다 뒤인 70레벨)
+    };
+
+    /** 시더가 정한 스킬의 기본 쿨타임(초). 관리자 화면의 "기본값으로" 버튼이 쓴다. 모르는 코드면 30 */
+    public static double defaultCooldown(String code) {
+        for (String[] r : SKILL_ROWS) if (r[0].equals(code)) return Double.parseDouble(r[3]);
+        return 30;
+    }
+
+    /** 시더가 정한 스킬의 기본 해금 레벨. 관리자 화면의 "기본값으로" 버튼이 쓴다. 모르는 코드면 1 */
+    public static int defaultRequiredLevel(String code) {
+        for (String[] r : SKILL_ROWS) if (r[0].equals(code)) return Integer.parseInt(r[4]);
+        return 1;
+    }
+
+    private int seedSkills() {
+        int added = 0;
+        for (int i = 0; i < SKILL_ROWS.length; i++) {
+            String[] r = SKILL_ROWS[i];
+            long order = (i + 1) * 10L;
+            var existing = skills.findByCode(r[0]);
+            if (existing.isPresent()) { // 목록 순서만 코드와 맞춘다(쿨타임·해금 레벨·기본 키는 운영에서 고친 값을 건드리지 않는다)
+                if (existing.get().getSortOrder() != order) { existing.get().changeSortOrder(order); skills.save(existing.get()); }
+                continue;
+            }
+            skills.save(new com.trendist.skill.entity.Skill(r[0], r[1], r[2], Double.parseDouble(r[3]), Integer.parseInt(r[4]), order));
+            added++;
+        }
+        return added;
+    }
+
+    private static int titleOrder(String name) {
+        int i = TITLE_ORDER.indexOf(name);
+        return (i < 0 ? TITLE_ORDER.size() : i) * 10 + 10;
+    }
+
+    /** 칭호 23~51. ID가 TITLES 뒤로 이 순서대로 붙는다(순서를 바꾸지 않는다) */
+    private static final String[][] MORE_TITLES = {
+            {"트렌드 탐험가", "키워드를 30번 추가했어요", "METRIC", "{\"metric\":\"add_count\",\"gte\":30}"},
+            {"일취월장", "20레벨에 도달했어요", "METRIC", "{\"metric\":\"level\",\"gte\":20}"},
+            {"그랜드마스터", "70레벨에 도달했어요", "METRIC", "{\"metric\":\"level\",\"gte\":70}"},
+            {"알뜰 수집가", "키워드를 동시에 10개 가졌어요", "METRIC", "{\"metric\":\"hold_count\",\"gte\":10}"},
+            {"슈퍼스타", "현재 유행도가 1,500에 도달했어요", "METRIC", "{\"metric\":\"current_score\",\"gte\":1500}"},
+            {"첫 마디", "댓글 점수 1점을 모았어요", "METRIC", "{\"metric\":\"comment_score\",\"gte\":1}"},
+            {"호기심 많은", "키워드를 10번 검색했어요", "METRIC", "{\"metric\":\"search_count\",\"gte\":10}"},
+            {"탐색가", "키워드를 100번 검색했어요", "METRIC", "{\"metric\":\"search_count\",\"gte\":100}"},
+            {"정보통", "키워드를 1,000번 검색했어요", "METRIC", "{\"metric\":\"search_count\",\"gte\":1000}"},
+            {"첫 승리", "키워드를 처음 빼앗았어요", "METRIC", "{\"metric\":\"steal_count\",\"gte\":1}"},
+            {"사냥꾼의 본능", "키워드를 50번 빼앗았어요", "METRIC", "{\"metric\":\"steal_count\",\"gte\":50}"},
+            {"아레나의 포식자", "키워드를 300번 빼앗았어요", "METRIC", "{\"metric\":\"steal_count\",\"gte\":300}"},
+            {"봇 사냥 입문", "봇을 10번 이겼어요", "METRIC", "{\"metric\":\"bot_win_count\",\"gte\":10}"},
+            {"봇 사냥꾼", "봇을 100번 이겼어요", "METRIC", "{\"metric\":\"bot_win_count\",\"gte\":100}"},
+            {"기계 파괴자", "봇을 500번 이겼어요", "METRIC", "{\"metric\":\"bot_win_count\",\"gte\":500}"},
+            {"행운 탐색자", "구슬을 10개 먹었어요", "METRIC", "{\"metric\":\"orb_count\",\"gte\":10}"},
+            {"구슬 수집가", "구슬을 100개 먹었어요", "METRIC", "{\"metric\":\"orb_count\",\"gte\":100}"},
+            {"구슬 마니아", "구슬을 1,000개 먹었어요", "METRIC", "{\"metric\":\"orb_count\",\"gte\":1000}"},
+            {"오뚝이", "키워드를 50번 잃고도 다시 일어났어요", "METRIC", "{\"metric\":\"lose_count\",\"gte\":50}"},
+            {"불굴", "키워드를 300번 잃고도 포기하지 않았어요", "METRIC", "{\"metric\":\"lose_count\",\"gte\":300}"},
+            {"새내기", "키워드를 모은 날이 3일이 됐어요", "METRIC", "{\"metric\":\"active_days\",\"gte\":3}"},
+            {"단골", "키워드를 모은 날이 7일이 됐어요", "METRIC", "{\"metric\":\"active_days\",\"gte\":7}"},
+            {"터줏대감", "키워드를 모은 날이 30일이 됐어요", "METRIC", "{\"metric\":\"active_days\",\"gte\":30}"},
+            {"산증인", "키워드를 모은 날이 100일이 됐어요", "METRIC", "{\"metric\":\"active_days\",\"gte\":100}"},
+            {"키워드 새싹", "키워드를 동시에 5개 가졌어요", "METRIC", "{\"metric\":\"hold_count\",\"gte\":5}"},
+            {"키워드 달인", "키워드를 동시에 40개 가졌어요", "METRIC", "{\"metric\":\"hold_count\",\"gte\":40}"},
+            {"키워드 거물", "키워드를 동시에 70개 가졌어요", "METRIC", "{\"metric\":\"hold_count\",\"gte\":70}"},
+            {"키워드 제왕", "키워드를 동시에 100개 가졌어요", "METRIC", "{\"metric\":\"hold_count\",\"gte\":100}"},
+            {"키워드 신화", "키워드를 동시에 200개 가졌어요", "METRIC", "{\"metric\":\"hold_count\",\"gte\":200}"},
+    };
+
+    /** 죽인 횟수 칭호(4.31) 5개 */
+    private static final String[][] KILL_TITLES = {
+            {"첫 처치", "상대를 처음 쓰러뜨렸어요", "METRIC", "{\"metric\":\"kill_count\",\"gte\":1}"},
+            {"해결사", "상대를 10번 쓰러뜨렸어요", "METRIC", "{\"metric\":\"kill_count\",\"gte\":10}"},
+            {"저승사자", "상대를 50번 쓰러뜨렸어요", "METRIC", "{\"metric\":\"kill_count\",\"gte\":50}"},
+            {"아레나의 지배자", "상대를 200번 쓰러뜨렸어요", "METRIC", "{\"metric\":\"kill_count\",\"gte\":200}"},
+            {"최후의 승자", "상대를 1,000번 쓰러뜨렸어요", "METRIC", "{\"metric\":\"kill_count\",\"gte\":1000}"},
+    };
+
+    /** 패배 횟수 칭호(4.31) 5개: 지는 것을 비웃지 않고 다시 일어서는 것을 칭찬하는 이름 */
+    private static final String[][] DEFEAT_TITLES = {
+            {"첫 패배", "처음으로 사망했어요", "METRIC", "{\"metric\":\"death_count\",\"gte\":1}"},
+            {"칠전팔기", "10번 사망하고도 다시 일어났어요", "METRIC", "{\"metric\":\"death_count\",\"gte\":10}"},
+            {"백전노장", "50번 사망했지만 계속 도전해요", "METRIC", "{\"metric\":\"death_count\",\"gte\":50}"},
+            {"불사조", "200번 쓰러지고도 다시 날아올랐어요", "METRIC", "{\"metric\":\"death_count\",\"gte\":200}"},
+            {"끝없는 도전자", "1,000번 사망해도 멈추지 않았어요", "METRIC", "{\"metric\":\"death_count\",\"gte\":1000}"},
+    };
+
+    /** 보스 처치 참여 횟수 칭호(4.35): 처치에 성공하고 참여 보상을 받은 횟수(boss_kill_count) */
+    private static final String[][] BOSS_TITLES = {
+            {"보스 사냥 입문", "보스 처치에 처음 참여했어요", "METRIC", "{\"metric\":\"boss_kill_count\",\"gte\":1}"},
+            {"보스 사냥꾼", "보스 처치에 5번 참여했어요", "METRIC", "{\"metric\":\"boss_kill_count\",\"gte\":5}"},
+            {"보스 슬레이어", "보스 처치에 25번 참여했어요", "METRIC", "{\"metric\":\"boss_kill_count\",\"gte\":25}"},
+            {"보스 정복자", "보스 처치에 100번 참여했어요", "METRIC", "{\"metric\":\"boss_kill_count\",\"gte\":100}"},
+    };
+
+    /** 최고 콤보 칭호(4.25) 5개: 연속으로 빼앗을수록 불꽃이 거세진다 */
+    private static final String[][] COMBO_TITLES = {
+            {"연속 타격", "콤보를 3 달성했어요", "METRIC", "{\"metric\":\"max_combo\",\"gte\":3}"},
+            {"불꽃 점화", "콤보를 5 달성해 불꽃을 붙였어요", "METRIC", "{\"metric\":\"max_combo\",\"gte\":5}"},
+            {"연쇄 반응", "콤보를 10 달성했어요", "METRIC", "{\"metric\":\"max_combo\",\"gte\":10}"},
+            {"폭주 기관차", "콤보를 20 달성했어요", "METRIC", "{\"metric\":\"max_combo\",\"gte\":20}"},
+            {"멈추지 않는 불꽃", "콤보를 40 달성했어요", "METRIC", "{\"metric\":\"max_combo\",\"gte\":40}"},
+    };
+
+    /** 유행도가 같은 상대와 부딪힌 횟수 칭호(4.3): 승패가 없는 박빙의 싸움을 놀리듯 부르는 이름 */
+    private static final String[][] TIE_TITLES = {
+            {"도토리 키재기", "유행도가 같은 상대와 10번 부딪혔어요", "METRIC", "{\"metric\":\"tie_count\",\"gte\":10}"},
+    };
+
+    /** 나중에 더한 최고 콤보 칭호(4.25): 100 콤보 */
+    private static final String[][] COMBO_EXTRA_TITLES = {
+            {"100 콤보", "콤보를 100 달성했어요", "METRIC", "{\"metric\":\"max_combo\",\"gte\":100}"},
+    };
+
+    /** 불꽃 끄기 칭호(4.25) 3개: 불타는 상대를 쓰러뜨린 사람 */
+    private static final String[][] FLAME_OUT_TITLES = {
+            {"불 끄미", "상대의 불꽃을 처음 꺼뜨렸어요", "METRIC", "{\"metric\":\"flame_out_count\",\"gte\":1}"},
+            {"소방관", "상대의 불꽃을 10번 꺼뜨렸어요", "METRIC", "{\"metric\":\"flame_out_count\",\"gte\":10}"},
+            {"화재 진압 대장", "상대의 불꽃을 50번 꺼뜨렸어요", "METRIC", "{\"metric\":\"flame_out_count\",\"gte\":50}"},
+    };
+
+    /** 칭호함에 보이는 순서: 종류별로 쉬운 것부터 */
+    private static final List<String> TITLE_ORDER = List.of(
+            "트렌드 워처", "트렌드 탐험가", "트렌드 수집가", "트렌드 사냥꾼", "트렌드 장인", "트렌드 전설",
+            "완전체", "스타일리스트", "일취월장", "베테랑", "마스터", "그랜드마스터", "레전드",
+            "키워드 새싹", "알뜰 수집가", "멀티태스커", "키워드 부자", "키워드 달인", "키워드 재벌", "키워드 거물", "키워드 제왕", "키워드 신화",
+            "떠오르는 별", "큰손", "슈퍼스타", "거인",
+            "핫스타", "시상대", "정상",
+            "첫 마디", "해설 새싹", "친절한 해설가", "해설 대장",
+            "호기심 많은", "탐색가", "정보통",
+            "첫 승리", "사냥꾼의 본능", "아레나의 포식자",
+            "봇 사냥 입문", "봇 사냥꾼", "기계 파괴자",
+            "행운 탐색자", "구슬 수집가", "구슬 마니아",
+            "오뚝이", "불굴",
+            "첫 처치", "해결사", "저승사자", "아레나의 지배자", "최후의 승자",
+            "첫 패배", "칠전팔기", "백전노장", "불사조", "끝없는 도전자",
+            "도토리 키재기",
+            "연속 타격", "불꽃 점화", "연쇄 반응", "폭주 기관차", "멈추지 않는 불꽃",
+            "100 콤보",
+            "불 끄미", "소방관", "화재 진압 대장",
+            "보스 사냥 입문", "보스 사냥꾼", "보스 슬레이어", "보스 정복자",
+            "새내기", "단골", "터줏대감", "산증인");
+
+    /** 이동 효과(4.23): 코드, 이름, 설명. 처음에는 모두 조건 없이(FREE) 쓸 수 있다. 순서가 고르는 화면의 순서다 */
+    /** 효과 종류(4.9, 4.23) */
+    private static final String[][] EFFECT_TYPES = {{EffectType.TRAIL, "이동 효과"}, {EffectType.BORDER, "테두리 효과"}};
+
+    /** 이동 효과(4.23). 그림은 프론트엔드 game/trails.ts가 코드값으로 그린다 */
+    private static final String[][] TRAIL_EFFECTS = {
+            {"afterimage", "잔상"},
+            {"sparkle", "별가루"},
+            {"flame", "불꽃"},
+            {"bubble", "물방울"},
+            {"rainbow", "무지개"},
+            {"footprint", "발자국"},
+            {"petal", "꽃잎"},
+            {"heart", "하트"},
+            {"note", "음표"},
+            {"bolt", "번개"},
+            {"smoke", "연기"},
+            {"snow", "눈송이"},
+            {"pawprint", "고양이·강아지 발바닥"},
+            {"birdprint", "새 발자국"},
+            {"bearprint", "곰 발자국"},
+            {"rabbitprint", "토끼 발자국"},
+    };
+
+    /** 테두리 효과(4.9). 그림은 프론트엔드 game/skin.ts가 코드값으로 그린다 */
+    private static final String[][] BORDER_EFFECTS = {
+            {"glow", "은은한 빛"},
+            {"dash", "도는 점선"},
+            {"gradient", "그라데이션"},
+            {"pulse", "맥박"},
+            {"rainbow", "무지개"},
+    };
+
+    private static final String[][] TITLES = {
+            {"트렌드 워처", "처음으로 키워드를 추가했어요", "METRIC", "{\"metric\":\"add_count\",\"gte\":1}"},
+            {"트렌드 수집가", "키워드를 100번 추가했어요", "METRIC", "{\"metric\":\"add_count\",\"gte\":100}"},
+            {"트렌드 사냥꾼", "키워드를 500번 추가했어요", "METRIC", "{\"metric\":\"add_count\",\"gte\":500}"},
+            {"트렌드 장인", "키워드를 2,000번 추가했어요", "METRIC", "{\"metric\":\"add_count\",\"gte\":2000}"},
+            {"트렌드 전설", "키워드를 10,000번 추가했어요", "METRIC", "{\"metric\":\"add_count\",\"gte\":10000}"},
+            {"완전체", "아이콘이 다 자랐어요(10레벨)", "METRIC", "{\"metric\":\"level\",\"gte\":10}"},
+            {"스타일리스트", "꾸미기가 열렸어요(10레벨)", "METRIC", "{\"metric\":\"level\",\"gte\":10}"},
+            {"베테랑", "30레벨에 도달했어요", "METRIC", "{\"metric\":\"level\",\"gte\":30}"},
+            {"마스터", "50레벨에 도달했어요", "METRIC", "{\"metric\":\"level\",\"gte\":50}"},
+            {"레전드", "100레벨에 도달했어요", "METRIC", "{\"metric\":\"level\",\"gte\":100}"},
+            {"멀티태스커", "키워드를 동시에 20개 가졌어요", "METRIC", "{\"metric\":\"hold_count\",\"gte\":20}"},
+            {"키워드 부자", "키워드를 동시에 30개 가졌어요", "METRIC", "{\"metric\":\"hold_count\",\"gte\":30}"},
+            {"키워드 재벌", "키워드를 동시에 50개 가졌어요", "METRIC", "{\"metric\":\"hold_count\",\"gte\":50}"},
+            {"떠오르는 별", "현재 유행도가 500에 도달했어요", "METRIC", "{\"metric\":\"current_score\",\"gte\":500}"},
+            {"큰손", "현재 유행도가 1,000에 도달했어요", "METRIC", "{\"metric\":\"current_score\",\"gte\":1000}"},
+            {"거인", "최대 크기(현재 유행도 2,000)에 도달했어요", "METRIC", "{\"metric\":\"current_score\",\"gte\":2000}"},
+            {"핫스타", "현재 유행도 TOP 10에 들었어요(접속자 10명 이상일 때)", "RANK", "{\"metric\":\"current_score\",\"within\":10}"},
+            {"시상대", "현재 유행도 TOP 3에 들었어요(접속자 10명 이상일 때)", "RANK", "{\"metric\":\"current_score\",\"within\":3}"},
+            {"정상", "현재 유행도 1위에 올랐어요(접속자 10명 이상일 때)", "RANK", "{\"metric\":\"current_score\",\"within\":1}"},
+            {"해설 새싹", "댓글 점수 10점을 모았어요", "METRIC", "{\"metric\":\"comment_score\",\"gte\":10}"},
+            {"친절한 해설가", "댓글 점수 100점을 모았어요", "METRIC", "{\"metric\":\"comment_score\",\"gte\":100}"},
+            {"해설 대장", "댓글 점수 500점을 모았어요", "METRIC", "{\"metric\":\"comment_score\",\"gte\":500}"},
+    };
+}

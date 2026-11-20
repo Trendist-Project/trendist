@@ -1,0 +1,46 @@
+package com.trendist.guide.entity;
+
+import com.trendist.common.entity.BaseTimeEntity;
+import com.trendist.common.support.Lang;
+import jakarta.persistence.*;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+
+/** 게임 가이드 카테고리(4.17). 보여 주는 형식은 FAQ(아코디언) 또는 ARTICLE(문서형). */
+@Getter
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+@Entity
+@Table(name = "guide_categories", uniqueConstraints = @UniqueConstraint(name = "uk_guide_categories_code", columnNames = "code"))
+public class GuideCategory extends BaseTimeEntity {
+    public static final String FAQ = "FAQ";
+    public static final String ARTICLE = "ARTICLE";
+
+    @Column(nullable = false, length = 50) private String code;
+    @Column(nullable = false, length = 100) private String name;
+    @Column(name = "name_en", length = 100) private String nameEn;
+    @Column(name = "display_type", nullable = false, length = 20) private String displayType;
+    @Column(name = "sort_order", nullable = false) private long sortOrder;
+    @Column(nullable = false) private boolean enabled = true;
+
+    /** 관리자 수정(13.4): 이름·형식·보이기 */
+    public void edit(String name, String displayType, boolean enabled) {
+        this.name = name; this.displayType = displayType; this.enabled = enabled;
+    }
+
+    /** 관리자 수정(영어 이름 포함) */
+    public void edit(String name, String nameEn, String displayType, boolean enabled) {
+        edit(name, displayType, enabled); this.nameEn = nameEn;
+    }
+
+    public String name(Lang lang) { return lang.pick(name, nameEn); }
+
+    /** 영어판 채우기(EnglishBackfill) */
+    public void changeNameEn(String nameEn) { this.nameEn = nameEn; }
+
+    public void changeSortOrder(long sortOrder) { this.sortOrder = sortOrder; }
+
+    public GuideCategory(String code, String name, String displayType, int sortOrder) {
+        this.code = code; this.name = name; this.displayType = displayType; this.sortOrder = sortOrder;
+    }
+}

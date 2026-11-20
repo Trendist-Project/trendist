@@ -1,0 +1,2380 @@
+package com.trendist.game.room;
+
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
+
+/**
+ * 나라별 방 하나(9.2). 틱 스레드 하나만 상태를 읽고 쓰므로 락이 없다. 다른 스레드는 tasks 큐에 작업을 넣는다.
+ * 이동·충돌은 서버 권위로 계산하고, 스냅샷(바이너리)을 2틱마다(10Hz) 보낸다.
+ */
+public class Room {
+    public static final int TICK_MS = 50;
+    private static final int SNAPSHOT_EVERY = 2;
+    private static final int MINIMAP_EVERY = 20; // 1초마다
+    private static final int MINIMAP_TOP = 20;   // 큰 아이콘 상위 20명(4.2)
+    /** 목표 속도로 다가가는 빠르기. 50ms마다 차이가 절반이 된다(클라이언트 Arena 예측과 같은 값). */
+    static final double ACCEL_RATE = Math.log(2) / 0.05;
+    /** 지연 보상으로 앞당기는 시간의 상한(초). 지연이 아주 크거나 값을 속여도 이 이상은 보상하지 않는다 */
+    static final double LAG_COMP_MAX_SEC = 0.15;
+    public static final double ORB_RADIUS = 14; // ? 구슬 반지름(px)
+
+    /** 틱에서 쓰는 설정값. 1분 캐시된 settings에서 매초 다시 읽는다. */
+    public record Tuning(double worldSize, double minRadius, double maxRadius, double scoreCap, double maxSpeed,
+                         double zoomFactor, double bigRatio, double knockbackCap, double knockbackSeconds, double knockbackDistance,
+                         double loseProtectSeconds,
+                         int orbMax, double orbSpawnSeconds, double orbDensity, double orbSpawnPercent, double orbActivePercent,
+                         int botPlayers, int botMinPlayers, double botCapRatio, double expScoreCap,
+                         double minEatReach, double viewRangeMultiplier) {
+        /** 시야 배율 없이 만든다(테스트 등): 기본 2배 */
+        public Tuning(double worldSize, double minRadius, double maxRadius, double scoreCap, double maxSpeed,
+                      double zoomFactor, double bigRatio, double knockbackCap, double knockbackSeconds, double knockbackDistance,
+                      double loseProtectSeconds, int orbMax, double orbSpawnSeconds, double orbDensity, double orbSpawnPercent, double orbActivePercent,
+                      int botPlayers, int botMinPlayers, double botCapRatio, double expScoreCap, double minEatReach) {
+            this(worldSize, minRadius, maxRadius, scoreCap, maxSpeed, zoomFactor, bigRatio, knockbackCap, knockbackSeconds, knockbackDistance,
+                    loseProtectSeconds, orbMax, orbSpawnSeconds, orbDensity, orbSpawnPercent, orbActivePercent, botPlayers, botMinPlayers, botCapRatio,
+                    expScoreCap, minEatReach, 2.0);
+        }
+    }
+
+    /**
+     * 세이프존 설정(4.22). 가운데 고정 존과 무작위 존의 한 변은 활동 영역 한 변의 비율(최소값 이상)이고,
+     * 무작위 존 수는 넓이 10,000×10,000px마다 density개(상한 max), 하나는 seconds초 동안 유지된다.
+     */
+    public record ZoneTuning(double centerRatio, double centerMin, double zoneRatio, double zoneMin,
+                             double density, int max, double seconds) {
+        public static final ZoneTuning DEFAULT = new ZoneTuning(0.09, 900, 0.05, 600, 12, 80, 300);
+    }
+
+    /** 무작위 세이프존 하나. 정사각형 중심(x, y)과 한 변, 사라지는 시각(방 시계 초). */
+    record SafeZone(int id, double x, double y, double size, double expiresAt) {}
+
+    /** 방 밖(서비스)으로 나가는 요청: 충돌로 키워드 잃기, 메시지 전송. */
+    public interface Outbox {
+        /**
+         * 사람이 키워드를 잃는다(몸싸움·불꽃·체력 0·공격 스킬), 또는 봇이 방 메모리에서 잃은 키워드를 이긴 사람에게 준다(4.3, 4.21, 4.25, 4.33, 4.36).
+         * 잃는 방식·알림·콤보 처리는 loss.cause()가 정한다(KeywordLoss). 틱 밖에서 DB로 처리하고 당한 사람·이긴 사람에게 알린다.
+         */
+        void requestLoss(Room room, KeywordLoss loss);
+        /** 장착 스킬 4칸이 바뀌었다(4.33). slots는 쉼표로 이은 코드(빈 칸은 빈 문자열)이고 틱 밖에서 저장한다. */
+        default void saveSkillSlots(Room room, Member member, List<String> slots) {}
+        /** ? 구슬을 먹었다. 보상(무작위 🔥 키워드)은 틱 밖에서 정하고 먹은 사람에게 알린다(4.20). */
+        void requestOrb(Room room, Member eater, boolean prize);
+        /** 사람(killer)이 상대를 죽였다(사람·봇 모두). 죽인 횟수를 올리고 칭호를 확인한다(4.31). */
+        default void requestKill(Room room, Member killer) {}
+        /** 사람(attacker)이 공격에 성공했다(봇의 키워드를 불꽃으로 모두 잃게 한 경우 등). 빼앗은 횟수를 +1 하고 칭호를 확인한다(4.3). */
+        default void requestSteal(Room room, Member attacker) {}
+        /** 사람(member)이 현재 유행도가 같은 원과 부딪혔다(승패가 없는 충돌). 횟수를 올리고 칭호를 확인한다(4.3). 봇은 부르지 않는다. */
+        default void requestTie(Room room, Member member) {}
+        /** 사람(loser)이 체력이 0이 되어 죽었다(패배). 패배 횟수를 올리고 칭호를 확인한다(4.31). 봇은 부르지 않는다. */
+        default void requestDefeat(Room room, Member loser) {}
+        /** 사람(winner)의 연속 빼앗기 콤보가 최고 기록(이 접속에서 보낸 값)을 넘었다. 저장된 최고 콤보보다 높으면 올리고 칭호를 확인한다(4.25). 봇은 부르지 않는다. */
+        default void requestCombo(Room room, Member winner, int combo) {}
+        /** 사람(by)이 상대(사람·봇)의 콤보 불꽃을 꺼뜨렸다. 횟수를 올리고 칭호를 확인한다(4.25). */
+        default void requestFlameOut(Room room, Member by) {}
+        /** 몬스터가 나왔다(4.35): 정해진 체력과 그때의 접속 사람 수·평균·1등 유행도를 등장 기록에 남긴다 */
+        default void monsterStarted(Room room, Monster.Spec spec, Monster.Start start) {}
+        /** 몬스터가 끝났다(처치·시간 초과·제거, 4.35): 플레이어별 피해를 기록하고 보상을 준다. 틱 밖에서 한다 */
+        default void monsterEnded(Room room, Monster.Result result) {}
+        void send(Member m, ByteBuffer binary);
+        void sendText(Member m, Map<String, Object> message);
+        /** 오래 응답이 없는 접속을 끊는다(방에서는 이미 뺐다). */
+        default void close(Member m) {}
+    }
+
+    /** 성장 캐릭터의 정해진 바탕색(4.9). 꾸미지 않은 원 */
+    public static final String DEFAULT_BACKGROUND = "#3fb68b";
+
+    /** 이름표 아래 칭호, 원의 꾸미기(art는 픽셀 그림 이미지 주소, 없으면 성장 캐릭터), 이동 효과. 입장 때 함께 받는다. */
+    public record Appearance(String title, Skin skin, String trail) {
+        public static final Appearance DEFAULT = new Appearance(null, Skin.DEFAULT, null);
+    }
+
+    /**
+     * 원의 꾸미기(4.9): 바탕색, 테두리 색·두께(1~8단계), 픽셀 그림 주소, 테두리 효과 코드, 이름표 글자색·모양.
+     * null이면 기본값이다. 그림은 클라이언트가 그린다.
+     */
+    public record Skin(String background, String borderColor, Integer borderWidth, String art,
+                       String borderEffect, String nameColor, String nameStyle) {
+        public static final Skin DEFAULT = new Skin(DEFAULT_BACKGROUND, null, null, null, null, null, null);
+    }
+
+    /**
+     * 연속 빼앗기 콤보(4.25). flameAt번 연속으로 이기면 원 둘레에 불꽃이 타오르고(그림은 클라이언트가 combo로 그린다),
+     * 한 번이라도 싸움에서 키워드를 잃으면 콤보와 불꽃이 모두 사라진다. countBots면 봇을 이긴 것도 센다.
+     * 불꽃인 사람이 불꽃이 없는 사람과 부딪히면 점수와 상관없이 이기고 상대는 키워드의 절반을 잃는다(4.25, 4.36).
+     * maxSeconds는 콤보의 남은 유지시간(초): 마지막으로 콤보가 오른 때부터 이 시간이 지나면 연속 횟수와 불꽃이 사라진다. 콤보가 추가될 때마다 다시 시작한다(0이면 제한 없음, 4.25).
+     */
+    public record ComboTuning(int flameAt, boolean countBots, int maxSeconds) {
+        public static final ComboTuning DEFAULT = new ComboTuning(5, true, 300);
+    }
+
+    /**
+     * 체력(HP, 4.36). max는 최대 체력(화면에는 100%), hitSeconds는 같은 두 사람 사이 피해 간격, flameMultiplier는 불꽃이 불꽃 없는 사람을 칠 때 공격력 배수,
+     * flameCounter는 그때 불꽃 쪽도 맞는지, safeRegenPercent는 가운데 고정 세이프존에서 초당 회복(%),
+     * publicBars는 모두에게 체력바를 보여 줄지, deathLosePercent·flameLosePercent는 죽을 때·불꽃에게 부딪힐 때 잃는 키워드 비율(%),
+     * killHealPercent는 처치했을 때 회복 배율(%): 회복(최대 체력의 %) = 처치당한 사람 유행도 ÷ (처치당한 사람 + 내 유행도) × 이 배율(0이면 없음).
+     */
+    public record HpTuning(boolean enabled, double max, double hitSeconds, double flameMultiplier, boolean flameCounter,
+                           double safeRegenPercent, boolean publicBars, int deathLosePercent, int flameLosePercent, double killHealPercent) {
+        /** 설정을 읽기 전의 기본(꺼짐): 실제 서버는 방을 만들 때 설정(hp_enabled 등)으로 바로 바꾼다 */
+        public static final HpTuning DEFAULT = new HpTuning(false, 100, 1, 5, true, 2, true, 50, 50, 100);
+        public static HpTuning on() { return new HpTuning(true, 100, 1, 5, true, 2, true, 50, 50, 100); }
+    }
+
+    /**
+     * 대시(4.27): 쓰면 seconds초 동안 최대 속도가 multiplier배가 되고, 쓴 때부터 cooldownSeconds초가 지나야 다시 쓴다(대시 시간 포함).
+     * 움직이려는 중(방향 입력이나 이동 목표가 있을 때)에만 쓸 수 있다.
+     */
+    public record DashTuning(double multiplier, double seconds, double cooldownSeconds) {
+        public static final DashTuning DEFAULT = new DashTuning(2, 3, 10);
+    }
+
+    /** 장착 칸 수의 기본값(4.33). 실제 칸 수는 서버가 actions의 SKILL_SLOT 동작 수로 정한다(setSkillSlotCount). 칸은 처음부터 모두 열려 있다 */
+    public static final int DEFAULT_SKILL_SLOTS = 5; // 대시도 칸에 장착하는 스킬이다(기본으로 1번 칸, 4.27·4.33)
+    public static final List<String> SKILLS = List.of("repel", "hook", "invincibility", "stealth", "poison", "darkness", "cleanse", "heal", "slow", "stun", "fireball", "quake", "absorb", "root", "silence", "confuse", "amplify", "fortify", "barrier", "berserk", "zone", "burst");
+    /**
+     * 바꾸기 전의 스킬 코드 → 지금 코드(V63). 반발은 shockwave, 화염구는 flame이었다(충격파 quake·콤보 불꽃과 헷갈려서 바꿨다).
+     * 서버를 바꾼 뒤에도 새로고침하지 않은 화면이 옛 코드로 보내는 것을 받아 주려는 것이라, 배포 뒤 한동안 지나면 지워도 된다.
+     */
+    static final Map<String, String> LEGACY_SKILL_CODES = Map.of("shockwave", "repel", "flame", "fireball");
+    public static String skillCode(String id) { return id == null ? null : LEGACY_SKILL_CODES.getOrDefault(id, id); }
+
+    /** 이모트(4.26): 원 위에 잠깐 뜨는 이모지. 코드만 주고받는다 */
+    public static final List<String> EMOTES = List.of("wave", "laugh", "cool", "cry", "angry", "thumbs", "heart", "fire");
+
+    public static final class Member {
+        public final int entityNo;
+        public final long playerId;
+        /** GameSocketHandler가 쓰는 세션. 연결이 끊겼다가 다시 들어오면(이어받기) 새 세션으로 바뀐다 */
+        public volatile Object session;
+        /** 연결이 끊겼지만 원은 아레나에 남아 있다(offline_keep_seconds 동안): 방은 똑같이 처리하되 메시지는 보내지 않는다(4.32) */
+        public volatile boolean offline;
+        public double offlineSince; // 끊긴 시각(방 시계 초)
+        public String nickname;
+        /** 활성 칭호(4.10). 없으면 null. 이름표 아래 작은 글씨로 보인다 */
+        public String title;
+        /** 꾸미기(4.9) */
+        public Skin skin = Skin.DEFAULT;
+        /** 체력(4.36): 0이면 죽는다. 최대 체력은 설정(hp_max). 소수 둘째 자리까지 들고, 화면에는 올림한 % 로 보인다 */
+        public double hp = 100;
+        boolean hpDirty;
+        /** 연속 빼앗기 콤보(4.25) */
+        public int combo;
+        /** 이 접속에서 이미 저장하라고 알린 최고 콤보(같은 값을 거듭 DB로 보내지 않으려는 것, 4.25) */
+        int comboRecordSent;
+        /** 콤보가 마지막으로 오른 시각(방 시계 초). 콤보 유지시간(4.25)은 이 시각부터 잰다: 콤보가 추가될 때마다 다시 시작한다 */
+        public double comboStartedAt;
+        /** 체력 싸움에서 피해를 더 줘서 콤보를 올린 때의 상대와 시각(방 시계 초). 같은 충돌의 키워드 결과가 콤보를 한 번 더 올리지 않게 거른다(4.25) */
+        /** 대시(4.27): 대시가 끝나는 시각과 다시 쓸 수 있는 시각(방 시계 초) */
+        public double dashUntil, dashReadyAt;
+        /** 스킬(4.33): SKILLS 순서대로 다시 쓸 수 있는 시각(방 시계 초). 은신이 끝나는 시각 */
+        public final double[] skillReadyAt = new double[SKILLS.size()];
+        public double stealthUntil;
+        /** 버프(4.33): 공격 증폭·피해 감소이 끝나는 시각(방 시계 초) */
+        public double amplifyUntil, fortifyUntil;
+        /** 보호막: 남은 쉴드량(체력 점수 단위), 처음 쉴드 %(최대 체력 대비), 끝나는 시각 */
+        public double barrier, barrierMax, barrierUntil;
+        /** 광폭화가 켜져 있다, 다음 초당 체력 소모 시각 */
+        public boolean berserk;
+        public double berserkNextAt;
+        /** 마지막으로 본인에게 알린 이동 속도 배수와 그 시각(StatusEffects.syncSpeed) */
+        public double lastSpeedMult = 1, speedSentAt;
+        /** 갈고리에 맞아 끌려오는 중이면 쓴 사람, 남은 끌려오는 시간(초), 맞을 때 키워드를 잃었는지(끝나면 무적을 준다). 끌려오는 동안은 이동·스킬·다른 원과의 충돌이 모두 막힌다 */
+        Member hookedBy;
+        double pullLeft;
+        /** 이동 효과 코드(4.23). null이면 없음. 그림은 클라이언트가 그린다 */
+        public String trail;
+        public int level;
+        public double score;
+        public double x, y, vx, vy;
+        /** 이번 틱 이동 단계가 시작되기 직전의 위치. 구슬 먹기는 이 위치에서 현재 위치까지의 선분으로 판정한다 */
+        public double prevX, prevY;
+        /** 이 접속의 입력이 서버에 닿는 데 걸리는 시간(초, 왕복의 절반, 상한 LAG_COMP_MAX_SEC). 클라이언트가 ping에 실어 보낸 값이고, 구슬 판정에서 서버 위치를 화면 위치 쪽으로 이만큼 앞당긴다 */
+        public volatile double lagSec;
+        /** 장착 스킬 4칸(4.33). 빈 칸은 null. null 배열이면 아직 고른 적 없어서 해금된 스킬이 해금 순서대로 채워진다 */
+        public volatile String[] loadout;
+        /** 걸려 있는 상태 효과(독·암흑·슬로우·스턴, 4.33). 다루는 것은 StatusEffects만 한다 */
+        final java.util.EnumMap<StatusEffects.Kind, StatusEffects.Effect> effects = new java.util.EnumMap<>(StatusEffects.Kind.class);
+        /** 정화 뒤 새 CC에 걸리지 않는 시각(방 시계 초) */
+        public double ccImmuneUntil;
+        public double radius, displayRadius;
+        public double dirX, dirY;          // 방향키 입력(-1~1)
+        public Double targetX, targetY;    // 클릭 목표(새로 찍으면 바로 바뀐다)
+        public double kbX, kbY, kbTime;    // 튕김: 전체 밀려날 거리(벡터)와 남은 시간
+        public double protectUntil;        // 키워드 잃기 보호 종료(방 시계 초)
+        public boolean safe;               // 이번 틱에 세이프존 안에 있다(4.22). 부딪히지 않는다
+        /** 화면에 보이는 세계 범위의 가로·세로 절반(px). 클라이언트가 알려 주며, 그 둘레(여유 포함)의 원만 스냅샷에 담는다(관심 영역 전송). 알리기 전에는 넉넉한 기본값 */
+        public double viewHalfW = 5000, viewHalfH = 5000;
+        public volatile boolean dead;      // 죽었다(체력 0, 4.31). 방에서는 이미 빠졌고, 다시 들어오기(리스폰) 전까지 입력을 받지 않는다
+        public final Set<Long> keywords = new HashSet<>();
+        /** 마지막으로 이 접속에서 메시지(ping 포함)를 받은 시각(nanoTime). 받는 스레드가 쓰고 틱이 읽는다 */
+        public volatile long lastHeardNanos;
+        /** NPC 봇(4.21). 연결도 키워드도 없고, 점수는 방 메모리에만 있다. playerId는 음수다. */
+        public boolean bot;
+        long botExp;         // 봇의 EXP(사람처럼 추가할 때마다 +1, 줄지 않는다). 레벨은 이것으로 정한다
+        final List<BotKw> botKeywords = new ArrayList<>(); // 봇이 가진 실제 키워드(방 메모리에만 있고 DB에는 저장하지 않는다, 4.21)
+        double botNextPlusAt; // 다음에 스스로 "추가"하는 시각
+        int botStyle;        // 0 겁쟁이(큰 원을 멀리서부터 피함) / 1 사냥꾼(작은 원을 쫓음) / 2 구슬 수집가
+        double botThinkAt;   // 다음에 목표를 다시 고르는 시각(방 시계 초)
+        double botReact;     // 반응 속도(목표를 다시 고르는 간격, 초). 봇마다 다르다
+        double botHeading;   // 돌아다닐 때의 진행 방향(라디안). 조금씩 휘어서 곡선으로 걷는다
+        double botIdleUntil; // 이 시각까지 잠깐 멈춰 있는다(사람처럼 쉬기)
+        double botChaseFrom, botChaseCooldown; // 쫓기 시작한 시각, 쫓다 포기한 뒤 다시 쫓지 않는 끝 시각
+        Integer botOrb;      // 노리는 구슬(다른 봇과 같은 구슬로 몰리지 않게)
+        /** 이번 틱 구간 안에 도착한 조작. 도착한 시점(구간 안 비율)부터 적용해 틱 경계로 반올림되지 않게 한다. */
+        final List<Control> controls = new ArrayList<>();
+
+        Member(int entityNo, long playerId, Object session) {
+            this.entityNo = entityNo; this.playerId = playerId; this.session = session;
+        }
+    }
+
+    private final long countryId;
+    private final Outbox outbox;
+    private final Combos combos = new Combos(this);
+    private final Queue<Consumer<Room>> tasks = new ConcurrentLinkedQueue<>();
+    private final Map<Integer, Member> members = new LinkedHashMap<>();
+    /** 최근 채팅(4.13). 새로 들어온 사람에게 보여 준다. 서버를 다시 켜면 비워진다(DB에는 30일 남는다). */
+    private final Deque<Map<String, Object>> chatHistory = new ArrayDeque<>();
+    private static final int CHAT_HISTORY = 50;
+    private final Map<Long, Member> byPlayer = new HashMap<>();
+    /**
+     * 관전자(13.13): 관리자가 방을 지켜본다. members에 넣지 않아서 방 크기·활동 영역·충돌·구슬·봇·랭킹에 아무 영향이 없고,
+     * 방이 모두에게 보내는 스냅샷·미니맵·글 메시지만 받는다. 틱 스레드에서만 바꾼다.
+     */
+    private final Set<Member> spectators = new LinkedHashSet<>();
+    private int nextSpectator = -1; // 관전자의 엔티티 번호(사람·봇과 겹치지 않게 음수)
+    public static final int MAX_SPECTATORS = 10;
+    private volatile int spectatorSize;
+    private final Map<Long, Set<Member>> holders = new HashMap<>();
+    private volatile double offlineKeepSeconds = 60; // 연결이 끊겨도 원이 아레나에 남아 있는 시간(초, 4.32). 0이면 바로 뺀다
+    private final Map<Integer, double[]> orbs = new LinkedHashMap<>(); // ? 구슬 번호 → {x, y}
+    private final Map<Integer, double[]> prizeOrbs = new LinkedHashMap<>(); // ! 구슬(불꽃에게 키워드를 모두 잃은 자리에 떨어짐) 번호 → {x, y, 사라질 시각}
+    /** ! 구슬이 먹히지 않으면 사라지는 시간(초)과 방 전체 상한(4.20) */
+    static final double PRIZE_ORB_SECONDS = 90;
+    static final int PRIZE_ORB_MAX = 300;
+    private int nextOrb = 1;
+    private double nextOrbAt;
+    private volatile ZoneTuning zoneTuning = ZoneTuning.DEFAULT;
+    private volatile ComboTuning comboTuning = ComboTuning.DEFAULT;
+    private volatile HpTuning hpTuning = HpTuning.DEFAULT;
+    private volatile DashTuning dashTuning = DashTuning.DEFAULT;
+    private volatile SkillConfig skillConfig = SkillConfig.DEFAULT;
+    /** DB(skills.enabled)에서 꺼 둔 스킬 코드. 쓰려 해도 아무 일도 없다(4.33) */
+    private volatile Set<String> disabledSkills = Set.of();
+    /** 스킬 코드 → 해금 레벨(DB skills.required_level). 없으면 처음부터 쓴다. 레벨이 모자라면 서버가 막는다(4.33) */
+    private volatile Map<String, Integer> requiredLevels = Map.of();
+    /** DB에 등록된 모든 스킬 코드(서버 규칙이 아직 없는 새 스킬 포함). 장착 가능 여부에만 쓴다 */
+    private volatile Set<String> knownSkills = Set.of();
+    /** 몬스터(4.35): 방 번호 → 몬스터. 설정값(종류 코드 → 이름 → 값)은 방이 1초마다 새로 받는다. monsterView는 관리자 모니터링용 복사본 */
+    private final Map<Integer, Monster> monsters = new LinkedHashMap<>();
+    private int nextMonster = 1;
+    private volatile Map<String, Map<String, Double>> monsterParams = Map.of();
+    private volatile List<Map<String, Object>> monsterView = List.of();
+    /** 상태 효과(독·암흑·슬로우·스턴)와 스킬 등록표(4.33) */
+    private final StatusEffects status = new StatusEffects(this);
+    private final PlayerSkills skills = new PlayerSkills(this);
+    private int nextBoltId = 1;
+    /**
+     * 지금의 활동 영역 한 변(0이면 아직 정하지 않음). 목표(접속 인원에 따른 값)보다 클 때는 areaShrinkSpeed(px/s)로만 줄어들어서
+     * 사람이 한꺼번에 나가거나 서버를 다시 켜도 원이 가장자리로 한꺼번에 밀려나지 않는다. 목표가 더 크면 바로 커진다. 틱 스레드에서만 바꾼다.
+     */
+    private double areaNow;
+    private volatile double areaGrowSpeed = 300; // 0이면 커질 때 바로
+    private volatile double areaShrinkSpeed; // 0이면 줄 때도 바로
+    private final List<SafeZone> zones = new ArrayList<>();
+    private int nextZone = 1;
+    private double centerSize, sentCenterSize = -1;
+
+    private volatile Tuning tuning;
+    private int nextEntity = 1;
+    private long tick;
+    private double clockSeconds;
+    private volatile int size;
+    private volatile Map<Long, Live> liveView = Map.of();
+
+    /** 조작 하나: 방향키 입력(target 없음) 또는 클릭 목표. at은 틱 구간 안에서의 비율(0~1). */
+    record Control(double at, double dx, double dy, Double targetX, Double targetY) {}
+
+    private final LongSupplier nanoClock;
+    private long prevTickNanos, tickNanos; // 지난 틱과 이번 틱이 시작한 시각. 그 사이에 도착한 조작의 시점을 잰다
+
+    public Room(long countryId, Tuning tuning, Outbox outbox) {
+        this(countryId, tuning, outbox, System::nanoTime);
+    }
+
+    public Room(long countryId, Tuning tuning, Outbox outbox, LongSupplier nanoClock) {
+        this.countryId = countryId; this.tuning = tuning; this.outbox = outbox; this.nanoClock = nanoClock;
+        Long seed = Long.getLong(SEED_PROPERTY);
+        this.random = seed != null ? new SplittableRandom(seed ^ countryId) : () -> ThreadLocalRandom.current().nextLong();
+    }
+
+    /** 이 시스템 속성이 있으면 방의 난수(봇 움직임·구슬 자리·보스 패턴 등)를 그 씨앗으로 고정한다. 테스트가 같은 결과를 내도록 Gradle이 넣는다(build.gradle.kts) */
+    public static final String SEED_PROPERTY = "trendist.room.seed";
+    /** 방의 모든 무작위는 여기서 뽑는다(씨앗을 고정할 수 있게). 기본은 스레드마다의 ThreadLocalRandom */
+    private final java.util.random.RandomGenerator random;
+    java.util.random.RandomGenerator random() { return random; }
+
+    public long countryId() { return countryId; }
+    public int size() { return size; }
+    public void setTuning(Tuning t) { this.tuning = t; }
+    public void setZoneTuning(ZoneTuning z) { this.zoneTuning = z; }
+    public void setComboTuning(ComboTuning c) { this.comboTuning = c; }
+    public void setHpTuning(HpTuning h) { this.hpTuning = h; }
+    public HpTuning hpTuning() { return hpTuning; }
+    public void setDashTuning(DashTuning d) { this.dashTuning = d; }
+    public DashTuning dashTuning() { return dashTuning; }
+    private int skillSlots = DEFAULT_SKILL_SLOTS;
+    /** 장착 칸 수(actions의 SKILL_SLOT 행 수). 입장하기 전에 정한다 */
+    public void setSkillSlotCount(int n) { this.skillSlots = Math.max(1, n); }
+    public int skillSlotCount() { return skillSlots; }
+    /** 스킬 쿨타임(DB skills)과 수치(settings)를 한꺼번에 받는다(4.33) */
+    public void setSkillConfig(SkillConfig c) { this.skillConfig = c; }
+    public SkillConfig skillConfig() { return skillConfig; }
+    public void setDisabledSkills(Set<String> codes) { this.disabledSkills = Set.copyOf(codes); }
+    public void setRequiredLevels(Map<String, Integer> levels) { this.requiredLevels = Map.copyOf(levels); }
+    public void setKnownSkills(Set<String> codes) { this.knownSkills = Set.copyOf(codes); }
+
+    /** 이 레벨로 그 스킬을 쓸 수 있는지. 모자라면 본인에게 {skillFail, reason: level, level: 필요 레벨}을 알린다 */
+    private boolean unlocked(Member m, String id) {
+        int need = requiredLevels.getOrDefault(id, 1);
+        if (m.level >= need) return true;
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("type", "skillFail"); msg.put("id", id); msg.put("reason", "level"); msg.put("level", need);
+        outbox.sendText(m, msg);
+        return false;
+    }
+    public void setAreaGrowSpeed(double pxPerSecond) { this.areaGrowSpeed = Math.max(0, pxPerSecond); }
+    public void setAreaShrinkSpeed(double pxPerSecond) { this.areaShrinkSpeed = Math.max(0, pxPerSecond); }
+    /** 연결이 끊겨도 원이 아레나에 남아 있는 시간(초). 0이면 끊기는 순간 뺀다(4.32). */
+    public void setOfflineKeepSeconds(double seconds) { this.offlineKeepSeconds = Math.max(0, seconds); }
+    /** 지금 활동 영역 한 변(저장용) */
+    public double currentArea() { return areaNow > 0 ? areaNow : activeArea(members.size()); }
+    private double currentHalf() { return currentArea() / 2; }
+
+    /** 영역을 목표에 맞춘다: 커질 때는 areaGrowSpeed, 줄 때는 areaShrinkSpeed만큼씩(0이면 바로). 맵 벽이 부드럽게 움직이도록 양쪽 모두 속도를 제한한다. */
+    private void updateArea(double dt) {
+        double target = activeArea(members.size());
+        if (areaNow <= 0) { areaNow = target; return; }
+        if (target > areaNow) {
+            double speed = areaGrowSpeed;
+            areaNow = speed <= 0 ? target : Math.min(target, areaNow + speed * dt);
+        } else if (target < areaNow) {
+            double speed = areaShrinkSpeed;
+            areaNow = speed <= 0 ? target : Math.max(target, areaNow - speed * dt);
+        }
+    }
+    public ComboTuning comboTuning() { return comboTuning; }
+    public ZoneTuning zoneTuning() { return zoneTuning; }
+    public Tuning tuning() { return tuning; }
+    public void submit(Consumer<Room> task) { tasks.add(task); }
+
+    /** 접속 중인 플레이어 한 명의 랭킹용 값. */
+    public record Live(long playerId, int entityNo, String nickname, int level, double score) {}
+
+    /** 랭킹에서 쓰는 접속 중인 플레이어(1초마다 갱신되는 읽기 전용 복사본, 플레이어 번호 → 값). */
+    public Map<Long, Live> liveView() { return liveView; }
+
+    // ------------------------------------------------------------ 틱 스레드에서만 부른다
+
+    public Member join(long playerId, Object session, String nickname, int level, double score, Collection<Long> keywordIds) {
+        return join(playerId, session, nickname, level, score, keywordIds, Appearance.DEFAULT);
+    }
+
+    /**
+     * 입장·리스폰(4.22, 4.31, 4.32): 언제나 가운데 고정 세이프존 안 무작위 위치에서 시작한다(마지막 위치는 기억하지 않는다). 세이프존이 안전한 자리라
+     * 입장 보호(무적)는 따로 주지 않는다. 연결이 끊겨도 원이 남아 있는 동안(offline_keep_seconds) 같은 계정이 다시 들어오면
+     * 새 원을 만들지 않고 그 원을 이어받는다(위치·보호·콤보 그대로).
+     */
+    public Member join(long playerId, Object session, String nickname, int level, double score, Collection<Long> keywordIds,
+                       Appearance look) {
+        Member old = byPlayer.get(playerId);
+        if (spectators.removeIf(s -> s.dead && s.playerId == playerId)) refreshSpectatorSize(); // 죽어서 구경하던 연결이 다시 들어온다(리스폰, 4.31)
+        if (old != null) return takeOver(old, session, nickname, keywordIds, look);
+        Member m = new Member(nextEntity++, playerId, session);
+        m.lastHeardNanos = nanoClock.getAsLong();
+        m.nickname = nickname; m.level = level; m.score = score;
+        m.hp = hpTuning.max(); // 새로 들어오면(처음·죽은 뒤 다시 들어올 때) 체력은 가득이다
+        m.title = look.title(); m.skin = look.skin() == null ? Skin.DEFAULT : look.skin(); m.trail = look.trail();
+        m.radius = radiusFor(score); m.displayRadius = m.radius;
+        if (areaNow <= 0) areaNow = activeArea(members.size() + 1); // 방의 첫 입장: 처음 크기를 정한다. 그 뒤로는 틱이 속도에 맞춰 키운다
+        double area = currentArea();
+        double[] spawn = centerSpawn(area);
+        m.x = spawn[0]; m.y = spawn[1];
+        m.keywords.addAll(keywordIds);
+        for (Long k : keywordIds) holders.computeIfAbsent(k, x -> new HashSet<>()).add(m);
+        members.put(m.entityNo, m);
+        byPlayer.put(playerId, m);
+        size = humanCount();
+        broadcastRoster();
+        outbox.sendText(m, orbListMessage());
+        outbox.sendText(m, zonesMessage());
+        outbox.sendText(m, RoomMessages.chatHistory(List.copyOf(chatHistory)));
+        outbox.sendText(m, hpMessage(m, 0));
+        hpPublicDirty = true; // 체력바를 공개 중이면 새로 들어온 사람에게도 다른 사람 체력을 알린다
+        return m;
+    }
+
+    /**
+     * 이미 방에 있는 같은 계정의 원을 새 연결이 이어받는다(끊긴 뒤 다시 들어왔거나, 새로고침해서 이전 연결의 끊김이 아직 안 보일 때):
+     * 위치·보호·콤보·점수는 그대로이고, 연결(세션)과 이름표·꾸미기·가진 키워드만 새 값으로 맞춘다. 이전 연결이 남아 있으면 더는 이 원을 움직이지 못한다.
+     */
+    private Member takeOver(Member old, Object session, String nickname, Collection<Long> keywordIds, Appearance look) {
+        old.session = session;
+        old.offline = false;
+        old.lastHeardNanos = nanoClock.getAsLong();
+        old.nickname = nickname;
+        old.title = look.title(); old.skin = look.skin() == null ? Skin.DEFAULT : look.skin(); old.trail = look.trail();
+        for (Long k : old.keywords) {
+            Set<Member> set = holders.get(k);
+            if (set != null) { set.remove(old); if (set.isEmpty()) holders.remove(k); }
+        }
+        old.keywords.clear();
+        old.keywords.addAll(keywordIds);
+        for (Long k : keywordIds) holders.computeIfAbsent(k, x -> new HashSet<>()).add(old);
+        old.dirX = 0; old.dirY = 0; old.targetX = null; old.targetY = null; old.controls.clear(); // 새 연결의 조작부터 받는다
+        // 새로고침하거나 화면을 떠났다 다시 들어오면 콤보는 처음부터다(4.25): 불꽃도 꺼지고 모두의 화면에서 지운다
+        combos.reset(old);
+        size = humanCount();
+        broadcastRoster();
+        outbox.sendText(old, orbListMessage());
+        outbox.sendText(old, zonesMessage());
+        outbox.sendText(old, RoomMessages.chatHistory(List.copyOf(chatHistory)));
+        outbox.sendText(old, hpMessage(old, 0)); // 새로고침해도 체력은 그대로다(다시 들어와서 회복하는 일이 없다)
+        hpPublicDirty = true;
+        return old;
+    }
+
+    /** 관전자를 받는다. 가득 찼으면 null. 방의 지금 상태(이름표·구슬·세이프존·최근 채팅)를 바로 보낸다. */
+    public Member addSpectator(Object session) {
+        if (spectatorSize >= MAX_SPECTATORS) return null;
+        Member sp = new Member(nextSpectator--, 0, session);
+        sp.lastHeardNanos = nanoClock.getAsLong();
+        sp.nickname = "(관전)";
+        spectators.add(sp);
+        refreshSpectatorSize();
+        outbox.sendText(sp, rosterMessage());
+        outbox.sendText(sp, orbListMessage());
+        outbox.sendText(sp, zonesMessage());
+        outbox.sendText(sp, RoomMessages.chatHistory(List.copyOf(chatHistory)));
+        return sp;
+    }
+
+    public void removeSpectator(Member sp) {
+        spectators.remove(sp);
+        refreshSpectatorSize();
+    }
+
+    /** 관전자 수는 관리자 관전만 센다. 죽어서 구경 중인 플레이어(4.31)는 세지 않는다. */
+    private void refreshSpectatorSize() { spectatorSize = (int) spectators.stream().filter(s -> !s.dead).count(); }
+
+    public Collection<Member> spectators() { return spectators; }
+    /** 지금 지켜보는 관전자 수(다른 스레드에서 읽어도 된다) */
+    public int spectatorCount() { return spectatorSize; }
+
+    /**
+     * 채팅 한 줄을 방 전체에 보낸다(4.13). 보낸 사람은 세션 엔티티 번호와 지금 닉네임으로만 가리킨다.
+     * 클라이언트는 이 번호로 말풍선을 아이콘 위에 띄운다.
+     */
+    public void chat(Member from, long id, String text, long atMillis) {
+        if (members.get(from.entityNo) != from) return; // 저장하는 사이에 나갔다
+        Map<String, Object> msg = RoomMessages.chat(id, from.entityNo, from.nickname, text, atMillis);
+        chatHistory.addLast(msg);
+        while (chatHistory.size() > CHAT_HISTORY) chatHistory.pollFirst();
+        for (Member m : members.values()) outbox.sendText(m, msg);
+        for (Member sp : spectators) outbox.sendText(sp, msg);
+    }
+
+    /** 이모트(4.26): 방 전체에 보내 그 원 위에 잠깐 띄운다. 코드는 받는 쪽에서 이미 검사했다. */
+    public void emote(Member from, String code) {
+        if (members.get(from.entityNo) != from) return;
+        Map<String, Object> msg = RoomMessages.emote(from.entityNo, code);
+        for (Member m : members.values()) outbox.sendText(m, msg);
+        for (Member sp : spectators) outbox.sendText(sp, msg);
+    }
+
+    /**
+     * 콤보 규칙(4.25)은 두 가지뿐이고 키워드를 잃고 빼앗는 일은 콤보를 건드리지 않는다(키워드 결과가 콤보를 두 번 올리던 문제를 없앴다).
+     * - 스킬 히트(skillHit): 맞힌 쪽 +1, 맞은 쪽 0. 모든 스킬 히트는 체력 피해가 있다.
+     * - 몸싸움(Combos.knock): 상대를 튕겨 낸 쪽만 +1, 튕겨 나간 쪽은 0. 서로 같이 튕기면(크기가 비슷) 둘 다 0.
+     * 아래 fightResult는 "이긴 쪽 +1, 진 쪽 0"을 한 번 적용하는 도구다(보스 히트·시험이 쓴다). 운영 중 키워드 결과는 부르지 않는다.
+     */
+    public void fightResult(Long winnerId, Long loserId, boolean vsBot) {
+        fightResult(winnerId == null ? null : byPlayer.get(winnerId), loserId == null ? null : byPlayer.get(loserId), vsBot);
+    }
+
+    /** 멤버 버전: 이긴 쪽과 진 쪽이 사람이든 봇이든 같은 규칙이다(4.25). null인 쪽은 건너뛴다. vsBot이면 진 쪽이 봇이고 설정(combo_bot_counts)이 꺼져 있으면 올리지 않는다 */
+    public void fightResult(Member winner, Member loser, boolean vsBot) {
+        combos.lose(loser, winner);
+        combos.win(winner, vsBot);
+    }
+
+    /** 콤보 규칙(4.25)은 Combos가 맡는다. 보스 히트·시험이 쓰는 "이긴 쪽 +1" */
+    void comboWin(Member winner, boolean vsBot) { combos.win(winner, vsBot); }
+
+    /**
+     * 연결이 끊겼다(나감·새로고침·네트워크 끊김, 4.32): 원은 마지막 위치에 그대로 offline_keep_seconds(기본 60초) 동안 남는다. 그동안 공격받거나
+     * 방어하거나 무적이 되는 일은 남아 있는 사람과 똑같고, 시간이 지나면 expireOffline이 진짜로 뺀다. session은 끊긴 연결이며,
+     * 이미 새 연결이 이어받았으면(다른 세션) 아무것도 하지 않는다. 시간이 0이면 바로 뺀다.
+     */
+    public void disconnect(Member m, Object session) {
+        if (m.session != session) return;
+        if (m.dead) { spectators.remove(m); refreshSpectatorSize(); return; } // 죽은 채로 나간다(4.31): 구경 목록에서만 뺀다
+        if (members.get(m.entityNo) != m || m.offline) return;
+        if (offlineKeepSeconds <= 0) { leave(m); return; }
+        m.offline = true;
+        m.offlineSince = clockSeconds;
+        m.dirX = 0; m.dirY = 0; m.targetX = null; m.targetY = null; m.controls.clear(); // 마지막으로 있던 자리에 가만히 남는다
+    }
+
+    /** 끊긴 지 offline_keep_seconds가 지난 원을 아레나에서 진짜로 뺀다(1초마다, 4.32). */
+    private void expireOffline() {
+        double keep = offlineKeepSeconds;
+        for (Member m : List.copyOf(members.values())) {
+            if (m.offline && clockSeconds - m.offlineSince >= keep) leave(m);
+        }
+    }
+
+    /** 방에서 바로 뺀다(끊긴 시간이 지났거나, 관리자 내보내기). 마지막 위치는 기억하지 않는다. */
+    public void leave(Member m) {
+        if (m.dead) { spectators.remove(m); refreshSpectatorSize(); return; } // 죽은 채로 나간다(4.31): 구경 목록에서만 뺀다
+        if (members.remove(m.entityNo) == null) return;
+        endBuffs(m);
+        byPlayer.remove(m.playerId);
+        for (Long k : m.keywords) {
+            Set<Member> set = holders.get(k);
+            if (set != null) { set.remove(m); if (set.isEmpty()) holders.remove(k); }
+        }
+        size = humanCount();
+        broadcastRoster();
+    }
+
+    /**
+     * 죽음(4.31): 체력이 0이 되었을 때. 방에서 빼고(보호·위치는 남기지 않는다) 죽은 사람에게 {died, by},
+     * 죽인 사람에게 {kill, target}을 보낸다. 연결은 그대로 두고, 클라이언트가 {respawn}을 보내 다시 들어올 때까지 기다린다.
+     * 이긴 쪽 콤보는 +1, 진 쪽 콤보는 0(4.25)이라 싸움 결과도 함께 처리한다.
+     */
+    private void die(Member loser, Member killer) { die(loser, killer, false); }
+
+    /** byHp이면 체력이 0이 되어 죽은 것이다(죽은 사람에게 알리는 {died}에 cause: hp를 싣는다) */
+    private void die(Member loser, Member killer, boolean byHp) {
+        if (loser.dead || members.get(loser.entityNo) != loser) return;
+        combos.lose(loser, killer); // 죽은 쪽의 콤보만 끝낸다. 이긴 쪽의 콤보는 그 처치를 낸 히트·튕김이 이미 올렸다(4.25)
+        healOnKill(killer, loser); // 처치 회복(4.36)
+        endBuffs(loser);
+        loser.dead = true;
+        members.remove(loser.entityNo);
+        if (!killer.bot) outbox.requestKill(this, killer); // 죽인 횟수(4.31): 죽은 쪽이 사람이든 봇이든 센다
+        if (loser.bot) {
+            // 봇도 사람처럼 죽는다(4.31): 방에서 빠지고, 다음 봇 채우기(1초마다)에서 같은 봇이 남은 키워드·EXP를 가지고 가운데 세이프존에서 다시 나온다(리스폰)
+            botRespawns++;
+            botRevives.addLast(new BotRevive(loser.botExp, List.copyOf(loser.botKeywords), loser.botStyle, loser.botReact));
+            while (botRevives.size() > 32) botRevives.pollFirst();
+            broadcastRoster();
+            if (!killer.bot) outbox.sendText(killer, RoomMessages.kill(loser.nickname));
+            return;
+        }
+        byPlayer.remove(loser.playerId);
+        outbox.requestDefeat(this, loser); // 패배 횟수(4.31): 연결이 끊긴 채 남아 있던 원이 져도 센다
+        if (loser.offline) {
+            // 연결이 끊긴 채 남아 있던 원이 죽었다(4.32): 구경할 연결이 없으므로 그대로 뺀다
+            size = humanCount();
+            broadcastRoster();
+            if (!killer.bot) outbox.sendText(killer, RoomMessages.kill(loser.nickname));
+            return;
+        }
+        spectators.add(loser); // 죽은 뒤에도 방의 실시간 모습(스냅샷·미니맵·채팅 등)을 관전자처럼 계속 받는다
+        size = humanCount();
+        broadcastRoster();
+        Map<String, Object> died = new HashMap<>();
+        died.put("type", "died"); died.put("by", killer.nickname); died.put("byE", killer.entityNo);
+        if (byHp) died.put("cause", "hp");
+        outbox.sendText(loser, died);
+        if (!killer.bot) outbox.sendText(killer, RoomMessages.kill(loser.nickname));
+    }
+
+    private int botRespawns; // 죽어서 다시 나와야 하는 봇 수(4.31)
+    /** 죽은 봇이 다시 나올 때 가져갈 것(EXP·남은 키워드·성격). 죽은 순서대로 다시 나온다 */
+    private record BotRevive(long exp, List<BotKw> keywords, int style, double react) {}
+    private final java.util.ArrayDeque<BotRevive> botRevives = new java.util.ArrayDeque<>();
+
+    public Member byPlayer(long playerId) { return byPlayer.get(playerId); }
+    public Member byEntity(int entityNo) { return members.get(entityNo); }
+    public Collection<Member> members() { return members.values(); }
+
+    public void setInput(Member m, double dx, double dy) {
+        double len = Math.hypot(dx, dy);
+        m.dirX = len > 1 ? dx / len : dx; m.dirY = len > 1 ? dy / len : dy;
+        if (len > 0) { m.targetX = null; m.targetY = null; }
+    }
+
+    public void setTarget(Member m, double x, double y) {
+        double half = currentHalf();
+        m.targetX = clamp(x, -half, half); m.targetY = clamp(y, -half, half);
+        m.dirX = 0; m.dirY = 0;
+    }
+
+    /** 방향키 입력. receivedNanos(도착 시각)부터 적용한다. */
+    public void setInput(Member m, double dx, double dy, long receivedNanos) {
+        m.controls.add(new Control(fractionOf(receivedNanos), dx, dy, null, null));
+    }
+
+    /** 클릭 목표. receivedNanos(도착 시각)부터 적용한다. */
+    public void setTarget(Member m, double x, double y, long receivedNanos) {
+        m.controls.add(new Control(fractionOf(receivedNanos), 0, 0, x, y));
+    }
+
+    /** 도착 시각이 지난 틱과 이번 틱 사이 어디쯤인지(0~1). */
+    private double fractionOf(long nanos) {
+        long span = tickNanos - prevTickNanos;
+        if (span <= 0) return 0;
+        return clamp((double) (nanos - prevTickNanos) / span, 0, 1);
+    }
+
+    /** 그 사람 점수를 DB 값으로 맞춘다. */
+    public void applyScore(long playerId, double score, int level) {
+        Member m = byPlayer.get(playerId);
+        if (m == null) return;
+        boolean levelUp = level > m.level;
+        m.score = score; m.level = level; m.radius = radiusFor(score);
+        if (levelUp) {
+            broadcastRoster();
+            if (hpTuning.enabled() && !m.dead) healPercent(m, 100); // 레벨업하면 체력이 가득 찬다(회복 알림도 같이 나가 + 표시가 뜬다)
+            if (m.loadout == null && !m.bot) outbox.sendText(m, loadoutMessage(m)); // 고른 적 없으면 새로 해금된 스킬이 빈 칸에 채워진다
+            // 레벨업 이펙트(4.30): 모두에게 같은 빛기둥(고정). 모든 원에서 그 원이 보이는 화면에 나온다
+            broadcast(RoomMessages.levelFx(m.entityNo, m.level));
+        }
+    }
+
+    /** 키워드 트렌드 값 변화: 접속 중인 보유자 모두에게 같은 변화량을 더한다(9.2). */
+    public void applyKeywordDelta(long keywordId, double deltaScore, Long excludePlayerId) {
+        Set<Member> set = holders.get(keywordId);
+        if (set == null) return;
+        for (Member m : set) {
+            if (excludePlayerId != null && m.playerId == excludePlayerId) continue;
+            m.score = Math.max(0, m.score + deltaScore);
+            m.radius = radiusFor(m.score);
+        }
+    }
+
+    public void applyHolding(long playerId, long keywordId, boolean added) {
+        Member m = byPlayer.get(playerId);
+        if (m == null) return;
+        if (added) {
+            m.keywords.add(keywordId);
+            holders.computeIfAbsent(keywordId, x -> new HashSet<>()).add(m);
+        } else {
+            m.keywords.remove(keywordId);
+            Set<Member> set = holders.get(keywordId);
+            if (set != null) { set.remove(m); if (set.isEmpty()) holders.remove(keywordId); }
+        }
+    }
+
+    /** 접속 중인 플레이어의 이름표를 바꾸고 모두에게 명단을 다시 보낸다. */
+    public void applyNickname(long playerId, String nickname) {
+        Member m = byPlayer.get(playerId);
+        if (m == null) return;
+        m.nickname = nickname;
+        broadcastRoster();
+    }
+
+    /** 활성 칭호가 바뀌었다(4.10). 모두에게 명단을 다시 보낸다. */
+    public void applyTitle(long playerId, String title) {
+        Member m = byPlayer.get(playerId);
+        if (m == null) return;
+        m.title = title;
+        broadcastRoster();
+    }
+
+    /** 꾸미기가 바뀌었다(4.9). 모두에게 명단을 다시 보낸다. */
+    public void applyLook(long playerId, Skin skin) {
+        Member m = byPlayer.get(playerId);
+        if (m == null) return;
+        m.skin = skin;
+        broadcastRoster();
+    }
+
+    /** 이동 효과가 바뀌었다(4.23). 모두에게 명단을 다시 보낸다. */
+    public void applyTrail(long playerId, String trail) {
+        Member m = byPlayer.get(playerId);
+        if (m == null) return;
+        m.trail = trail;
+        broadcastRoster();
+    }
+
+    public void protect(long playerId) {
+        Member m = byPlayer.get(playerId);
+        if (m != null) m.protectUntil = clockSeconds + tuning.loseProtectSeconds();
+    }
+
+    public void tick() {
+        long now = nanoClock.getAsLong();
+        prevTickNanos = tickNanos == 0 ? now - TICK_MS * 1_000_000L : tickNanos;
+        tickNanos = now;
+        Consumer<Room> t;
+        while ((t = tasks.poll()) != null) {
+            try { t.accept(this); } catch (RuntimeException e) { org.slf4j.LoggerFactory.getLogger(Room.class).warn("room task failed", e); }
+        }
+        double dt = TICK_MS / 1000.0;
+        clockSeconds += dt;
+        tick++;
+        Tuning tu = tuning;
+        updateArea(dt);
+        double half = currentHalf();
+        if (tick % 20 == 0) { dropSilent(); expireOffline(); maintainBots(tu); combos.expire(); }
+        thinkBots(tu, half);
+        // 이동 단계가 시작되기 직전 위치를 기록한다: 입장·리스폰·직접 위치 변경은 이 앞에서 일어나므로 구슬 먹기 선분에 들어가지 않는다
+        for (Member m : members.values()) { m.prevX = m.x; m.prevY = m.y; }
+        for (Member m : members.values()) move(m, dt, tu, half);
+        skills.hook.pull(dt, half); // 끌려오는 원은 다른 원이 모두 움직인 뒤에 끌어당긴다(끌어당긴 사람이 같은 틱에 더 움직여서 닿지 않는 일이 없게)
+        updateZones(half);
+        for (Member m : members.values()) m.safe = inSafeZone(m.x, m.y);
+        updateHp(dt);
+        skills.update(dt);
+        status.tick();
+        updateBuffs();
+        collide(tu);
+        tickMonsters(dt);
+        skills.hook.finish();
+        eatOrbs();
+        spawnOrbs(tu, half);
+        for (Member m : members.values()) {
+            // 크기 변화는 0.5초에 걸쳐 부드럽게(4.2)
+            m.displayRadius += (m.radius - m.displayRadius) * Math.min(1, dt / 0.5 * 3);
+        }
+        if (tick % SNAPSHOT_EVERY == 0) sendSnapshots(half);
+        if (tick % MINIMAP_EVERY == 0) sendMinimap();
+        if (tick % 20 == 0) {
+            monsterView = monsters.values().stream().map(mo -> mo.viewMessage(this)).toList();
+            Map<Long, Live> view = new HashMap<>();
+            for (Member m : members.values()) if (!m.bot) view.put(m.playerId, new Live(m.playerId, m.entityNo, m.nickname, m.level, m.score)); // 랭킹·정보 팝업은 사람만
+            liveView = view;
+        }
+    }
+
+
+    // ------------------------------------------------------------ 몬스터(4.35)
+
+    double clock() { return clockSeconds; }
+    Outbox outbox() { return outbox; }
+    double half() { return currentHalf(); }
+    Tuning tuningNow() { return tuning; }
+    public Map<String, Double> monsterParams(String code) { return monsterParams.get(code); }
+    public void setMonsterParams(Map<String, Map<String, Double>> params) { this.monsterParams = params; }
+    /** 지금 싸우는 몬스터의 요약(관리자 모니터링). 1초마다 갱신되는 복사본이라 아무 스레드에서나 읽는다 */
+    public List<Map<String, Object>> monsterView() { return monsterView; }
+
+    /** 몬스터를 낸다(틱 스레드: submit으로 부른다). 체력을 정하고 모두에게 알린 뒤 DB 기록에 알린다. 이미 같은 종류가 있으면 아무것도 하지 않는다 */
+    public void spawnMonster(Monster.Spec spec) {
+        for (Monster mo : monsters.values()) if (mo.spec.code().equals(spec.code())) return;
+        Monster mo = Monster.create(this, nextMonster++, spec);
+        if (mo == null) return;
+        monsters.put(mo.id, mo);
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("type", "monsterSpawn"); msg.put("id", mo.id); msg.put("name", spec.name()); msg.put("en", spec.nameEn()); msg.put("max", mo.maxHp);
+        msg.put("durationMs", Math.round((mo.endsAt - mo.startedAt) * 1000));
+        broadcast(msg);
+        broadcast(mo.stateMessage(this));
+        monsterView = monsters.values().stream().map(x -> x.viewMessage(this)).toList();
+        outbox.monsterStarted(this, spec, mo.start);
+    }
+
+    /** 몬스터를 끝낸다(처치·시간 초과·제거). 모두에게 결과와 피해 순위를 알리고 DB 기록·보상은 틱 밖에서 한다 */
+    void endMonster(Monster mo, String status) {
+        if (mo.ended) return;
+        mo.ended = true;
+        monsters.remove(mo.id);
+        Monster.Result result = mo.result(this, status);
+        Map<String, Object> msg = mo.topList(5);
+        msg.put("type", "monsterEnd"); msg.put("id", mo.id); msg.put("name", mo.spec.name()); msg.put("en", mo.spec.nameEn());
+        msg.put("result", status); msg.put("max", mo.maxHp); msg.put("hp", Math.max(0, mo.hp));
+        broadcast(msg);
+        monsterView = monsters.values().stream().map(x -> x.viewMessage(this)).toList();
+        outbox.monsterEnded(this, result);
+    }
+
+    /** 관리자: 그 번호의 몬스터를 끝낸다(틱 스레드에서 부른다). status는 KILLED(보상 지급)·REMOVED(보상 없음)·TIMEOUT */
+    public boolean removeMonster(int id, String status) {
+        Monster mo = monsters.get(id);
+        if (mo == null) return false;
+        endMonster(mo, status);
+        return true;
+    }
+
+    /** 테스트와 같은 패키지의 코드가 지금 있는 몬스터를 본다 */
+    Collection<Monster> monsters() { return monsters.values(); }
+
+    private void tickMonsters(double dt) {
+        if (monsters.isEmpty()) return;
+        for (Monster mo : new ArrayList<>(monsters.values())) {
+            if (mo.ended) continue;
+            mo.tick(this, dt);
+            if (!mo.ended && (mo.fastState() || tick % 2 == 0)) broadcast(mo.stateMessage(this)); // 10Hz, 돌진처럼 빠르게 움직일 때는 매 틱(화면이 끊기지 않게)
+        }
+    }
+
+    /** 보스에게 맞은 사람이 보스에게서 튕겨 난다(일반 충돌의 튕김과 같은 식) */
+    void knockFrom(Member m, double nx, double ny, double strength, Tuning tu) { knock(m, nx, ny, strength, tu); }
+
+    /** 무적(보호막) 표시: 모두의 화면에 seconds초 */
+    void invincibleFor(Member m, double seconds) {
+        broadcast(RoomMessages.invincibility(m.entityNo, SkillFx.ms(seconds)));
+    }
+
+
+    /**
+     * 보스 패턴(돌진·충격고리)에 맞았다(4.35): 최대 체력의 percent%를 잃고, 남은 체력이 그 이하면 죽는다(키워드는 그대로, 죽음은 monsterKill과 같다).
+     * 체력(HP) 방식이 꺼져 있으면 아무 일도 없다. 모두에게 맞은 %를 알린다({hpHit}, 때린 원은 -1).
+     */
+    void monsterHurt(Member m, String by, double percent) {
+        if (!hpTuning.enabled() || m.bot || m.dead || percent <= 0) return;
+        double total = modifyDamage(null, m, hpTuning.max() * percent / 100.0); // 피해 감소 → 보호막 순서
+        double dmg = absorb(m, total);
+        percent = total / hpTuning.max() * 100.0;                              // 화면에는 쉴드가 막은 몫까지 합친 전체 피해를 보인다
+        if (dmg <= 0) { broadcast(RoomMessages.hpHit(m.entityNo, -1, round2(Math.min(100.0, percent)), hpPercent(m))); return; }
+        if (round2(m.hp - dmg) <= 0) { monsterKill(m, by); return; }
+        m.hp = round2(m.hp - dmg);
+        markHp(m); hpPublicDirty = true;
+        broadcast(RoomMessages.hpHit(m.entityNo, -1, round2(Math.min(100.0, percent)), hpPercent(m)));
+    }
+
+    /** 몬스터에게 즉사한다(4.35): 키워드는 그대로 두고 죽음(4.31)과 같이 방에서 빠져 구경 목록으로 간다 */
+    void monsterKill(Member loser, String by) {
+        if (loser.dead || members.get(loser.entityNo) != loser) return;
+        combos.reset(loser);
+        loser.dead = true;
+        members.remove(loser.entityNo);
+        byPlayer.remove(loser.playerId);
+        outbox.requestDefeat(this, loser);
+        size = humanCount();
+        broadcastRoster();
+        if (loser.offline) return;
+        spectators.add(loser);
+        Map<String, Object> died = new HashMap<>();
+        died.put("type", "died"); died.put("by", by); died.put("byE", -1);
+        outbox.sendText(loser, died);
+    }
+
+    // ------------------------------------------------------------ 내부
+
+    /**
+     * 이번 틱 구간을 조작이 도착한 시점마다 나눠 움직인다. 방향키를 짧게 눌렀다 떼도 누른 시간만큼만 움직여서
+     * 클라이언트 예측과 같은 곳에 멈춘다(틱 경계로 반올림하면 최대 50ms만큼 더 가거나 덜 가서, 멈춘 뒤 화면이 보정된다).
+     */
+    private void move(Member m, double dt, Tuning tu, double half) {
+        if (held(m)) {
+            // 갈고리에 끌려오는 중이거나 스턴(4.33): 조작은 받아 두되 움직이지 않는다. 끌려올 때 위치는 HookSkill.pull이 정한다
+            if (status.stunned(m)) { m.vx = 0; m.vy = 0; }
+            for (Control c : m.controls) {
+                if (c.targetX() != null) setTarget(m, c.targetX(), c.targetY());
+                else setInput(m, c.dx(), c.dy());
+            }
+            m.controls.clear();
+            return;
+        }
+        double done = 0;
+        for (Control c : m.controls) {
+            double at = c.at() * dt;
+            if (at > done) { advance(m, at - done, tu); done = at; }
+            if (c.targetX() != null) setTarget(m, c.targetX(), c.targetY());
+            else setInput(m, c.dx(), c.dy());
+        }
+        m.controls.clear();
+        advance(m, dt - done, tu);
+        if (m.kbTime > 0) {
+            // 튕김은 처음에 빠르고 점점 느려진다(속도 ∝ (남은 시간/T)²). 남은 거리 비율은 (남은 시간/T)³이라
+            // 이번 틱에 갈 거리를 정확히 구해서, 틱 간격과 관계없이 같은 거리만큼 밀려난다
+            double T = tu.knockbackSeconds(), before = m.kbTime / T, after = Math.max(0, m.kbTime - dt) / T;
+            double share = before * before * before - after * after * after;
+            m.x += m.kbX * share; m.y += m.kbY * share;
+            m.kbTime = Math.max(0, m.kbTime - dt);
+        }
+        double r = m.displayRadius;
+        m.x = clamp(m.x, -half + r, half - r); m.y = clamp(m.y, -half + r, half - r);
+    }
+
+    /**
+     * h초 동안 목표 속도로 다가가며 움직인다. 속도 차이가 지수로 줄어드는 식을 정확히 풀어서, 나눠 계산해도
+     * 한 번에 계산한 것과 같고 클라이언트 예측(Arena)과도 같은 결과가 된다.
+     */
+    private void advance(Member m, double h, Tuning tu) {
+        if (h <= 0) return;
+        double speed = tu.maxSpeed() * (clockSeconds < m.dashUntil ? dashTuning.multiplier() : 1) * status.speedMult(m); // 크기와 관계없이 모두 같다. 대시 중이면 배수, 슬로우·속박이면 감속, 광폭화면 가속
+        double wantX = 0, wantY = 0;
+        if (m.dirX != 0 || m.dirY != 0) {
+            wantX = m.dirX * speed; wantY = m.dirY * speed;
+        } else if (m.targetX != null) {
+            double dx = m.targetX - m.x, dy = m.targetY - m.y, d = Math.hypot(dx, dy);
+            if (d < 4) { m.targetX = null; m.targetY = null; }
+            else {
+                double s = speed * Math.min(1, d / 120); // 근처에서 감속
+                wantX = dx / d * s; wantY = dy / d * s;
+            }
+        }
+        if (status.confused(m)) { wantX = -wantX; wantY = -wantY; } // 혼란: 조작 방향이 반대다(클라이언트 예측도 같다)
+        // 입력도 목표도 없으면 감속해 그 자리에 멈춘다(자동으로 떠다니지 않는다)
+        double e = Math.exp(-ACCEL_RATE * h), moved = (1 - e) / ACCEL_RATE;
+        m.x += wantX * h + (m.vx - wantX) * moved; m.y += wantY * h + (m.vy - wantY) * moved;
+        m.vx = wantX + (m.vx - wantX) * e; m.vy = wantY + (m.vy - wantY) * e;
+    }
+
+    // ------------------------------------------------------------ 세이프존(4.22)
+
+    /** 원의 중심이 가운데 고정 존이나 무작위 존 안에 있는지. */
+    boolean inSafeZone(double x, double y) { return inSafeZone(x, y, 0); }
+
+    /** 보스처럼 큰 몸이 세이프존을 피해 다닐 때: 존을 margin만큼 넓혀 그 안인지 본다 */
+    boolean nearSafeZone(double x, double y, double margin) { return inSafeZone(x, y, margin); }
+
+    /** 존을 margin만큼 넓혀서 본다(구슬이 존 가장자리에 걸치지 않게). */
+    private boolean inSafeZone(double x, double y, double margin) {
+        double c = centerSize / 2 + margin;
+        if (Math.abs(x) <= c && Math.abs(y) <= c) return true;
+        for (SafeZone z : zones) {
+            double h = z.size() / 2 + margin;
+            if (Math.abs(x - z.x()) <= h && Math.abs(y - z.y()) <= h) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 가운데 고정 존 크기를 활동 영역에 맞추고, 시간이 다 됐거나 영역 밖으로 나간 무작위 존을 지운다.
+     * 무작위 존은 목표 개수(넓이 비례)보다 적으면 1초에 하나씩 무작위 위치에 생긴다. 바뀌면 모두에게 목록을 다시 보낸다.
+     */
+    private void updateZones(double half) {
+        ZoneTuning zt = zoneTuning;
+        double area = half * 2;
+        centerSize = Math.min(area / 2, Math.max(zt.centerMin(), area * zt.centerRatio()));
+        boolean changed = Math.abs(centerSize - sentCenterSize) > 1;
+        changed |= zones.removeIf(z -> z.expiresAt() <= clockSeconds
+                || Math.abs(z.x()) + z.size() / 2 > half || Math.abs(z.y()) + z.size() / 2 > half);
+        int target = (int) Math.min(zt.max(), Math.round(area * area / 1e8 * zt.density()));
+        if (!members.isEmpty() && zones.size() < target && tick % 20 == 0) changed |= spawnZone(half, zt);
+        if (changed) {
+            sentCenterSize = centerSize;
+            broadcast(zonesMessage());
+            removeOrbsInZones();
+        }
+    }
+
+    /** 세이프존이 생기거나 커지면 그 안에 있던 ? 구슬은 사라진다(모두의 화면에서 지운다). */
+    private void removeOrbsInZones() {
+        Iterator<Map.Entry<Integer, double[]>> it = orbs.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Integer, double[]> o = it.next();
+            if (!inSafeZone(o.getValue()[0], o.getValue()[1], ORB_RADIUS)) continue;
+            it.remove();
+            broadcast(RoomMessages.orbEaten(o.getKey(), 0));
+        }
+    }
+
+    /** 다른 존과 겹치지 않는 무작위 위치에 존 하나. 10번 안에 자리를 못 찾으면 다음 기회에. */
+    private boolean spawnZone(double half, ZoneTuning zt) {
+        double size = Math.max(zt.zoneMin(), half * 2 * zt.zoneRatio()), gap = 200;
+        double range = half - size / 2 - 100;
+        if (range <= 0) return false;
+        java.util.random.RandomGenerator rnd = random;
+        for (int tries = 0; tries < 10; tries++) {
+            double x = (rnd.nextDouble() * 2 - 1) * range, y = (rnd.nextDouble() * 2 - 1) * range;
+            double reach = (centerSize + size) / 2 + gap;
+            if (Math.abs(x) < reach && Math.abs(y) < reach) continue;
+            boolean blocked = false;
+            for (SafeZone z : zones) {
+                double r = (z.size() + size) / 2 + gap;
+                if (Math.abs(x - z.x()) < r && Math.abs(y - z.y()) < r) { blocked = true; break; }
+            }
+            if (blocked) continue;
+            zones.add(new SafeZone(nextZone++, x, y, size, clockSeconds + zt.seconds()));
+            return true;
+        }
+        return false;
+    }
+
+    /** {type: safeZones, center: 한 변, zones: [[번호, x, y, 한 변, 남은 ms]...]} */
+    private Map<String, Object> zonesMessage() {
+        List<List<Object>> list = new ArrayList<>();
+        for (SafeZone z : zones) list.add(List.of(z.id(), z.x(), z.y(), z.size(), Math.round((z.expiresAt() - clockSeconds) * 1000)));
+        return RoomMessages.safeZones(centerSize, list);
+    }
+
+    /** 입장·리스폰 위치: 가운데 고정 존 안 무작위 위치. */
+    private double[] centerSpawn(double area) {
+        double c = Math.min(area / 2, Math.max(zoneTuning.centerMin(), area * zoneTuning.centerRatio()));
+        double range = Math.max(0, c / 2 - 60);
+        java.util.random.RandomGenerator rnd = random;
+        return new double[]{(rnd.nextDouble() * 2 - 1) * range, (rnd.nextDouble() * 2 - 1) * range};
+    }
+
+    /** 테스트용: 지금 무작위 세이프존 수와 가운데 존 한 변. */
+    int zoneCount() { return zones.size(); }
+    double centerZoneSize() { return centerSize; }
+
+    // ------------------------------------------------------------ ? 구슬(4.20)
+
+    /**
+     * 이번 틱에 원이 움직인 경로(이동 시작 위치에서 현재 위치까지의 선분)가 구슬 중심을 덮었는지.
+     * 빠르게 움직이면 틱 사이에 구슬을 지나치므로 현재 위치의 점 판정만으로는 놓친다. 선분 길이가 0이면 점 판정과 같다.
+     * 먹는 거리는 화면에 보이는 접촉(원 반지름 + 구슬 반지름)이다. 구슬 중심을 거의 덮어야 먹으면, 작은 원은 겹쳐 보이는데도 안 먹히고
+     * 지나치는 것처럼 느껴진다(4.20).
+     */
+    boolean sweepCovers(Member m, double ox, double oy) {
+        // 서버의 내 원은 입력이 닿는 시간만큼 화면의 내 원보다 뒤에 있다. 경로 끝을 현재 속도로 그만큼 앞당겨 화면에서 닿은 구슬을 놓치지 않게 한다(지연 보상)
+        double lag = Math.min(m.lagSec, LAG_COMP_MAX_SEC);
+        double ex = m.x + m.vx * lag, ey = m.y + m.vy * lag;
+        double sx = ex - m.prevX, sy = ey - m.prevY, len2 = sx * sx + sy * sy;
+        double t = len2 > 0 ? Math.max(0, Math.min(1, ((ox - m.prevX) * sx + (oy - m.prevY) * sy) / len2)) : 0;
+        double dist = Math.hypot(m.prevX + sx * t - ox, m.prevY + sy * t - oy);
+        return dist < Math.max(m.displayRadius + ORB_RADIUS, tuning.minEatReach());
+    }
+
+    /** 원이 구슬 중심을 덮으면(이번 틱 이동 경로 포함) 먹는다. 구슬은 바로 사라지고, 모두에게 누가 먹었는지 알려 먹는 연출을 보여 준다. */
+    private void eatOrbs() {
+        eatPrizeOrbs();
+        if (orbs.isEmpty()) return;
+        Iterator<Map.Entry<Integer, double[]>> it = orbs.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Integer, double[]> o = it.next();
+            double[] p = o.getValue();
+            Member eater = null;
+            for (Member m : members.values()) {
+                if (sweepCovers(m, p[0], p[1])) { eater = m; break; }
+            }
+            if (eater == null) continue;
+            it.remove();
+            broadcast(RoomMessages.orbEaten(o.getKey(), eater.entityNo));
+            if (eater.bot) botOrb(eater);
+            else outbox.requestOrb(this, eater, false);
+        }
+    }
+
+    /** ! 구슬: ? 구슬과 같이 덮으면 먹고, 먹으면 항상 키워드를 얻는다. 시간이 지나도 안 먹히면 사라진다(4.20). */
+    private void eatPrizeOrbs() {
+        if (prizeOrbs.isEmpty()) return;
+        Iterator<Map.Entry<Integer, double[]>> it = prizeOrbs.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Integer, double[]> o = it.next();
+            double[] p = o.getValue();
+            if (clockSeconds >= p[2]) {
+                it.remove();
+                broadcast(RoomMessages.orbEaten(o.getKey(), 0));
+                continue;
+            }
+            Member eater = null;
+            for (Member m : members.values()) {
+                if (sweepCovers(m, p[0], p[1])) { eater = m; break; }
+            }
+            if (eater == null) continue;
+            it.remove();
+            broadcast(RoomMessages.orbEaten(o.getKey(), eater.entityNo));
+            if (eater.bot) botPlus(eater, tuning);
+            else outbox.requestOrb(this, eater, true);
+        }
+    }
+
+    /**
+     * 불꽃에게 맞거나 체력이 0이 되어 키워드를 잃은 사람·봇 둘레에 ! 구슬을 떨어뜨린다(4.20, 4.25, 4.36). **개수 = 잃은 🔥활성 키워드 수의 절반**(내림, 💤 비활성은 세지 않는다)이고 **잃은 것이 있으면 최소 1개**는 떨어진다(활성이 하나도 없어도).
+     * 원 가장자리 바깥으로 흩어지고, 활동 영역 안·세이프존 밖에만 놓는다. 방 전체 상한을 넘으면 더 만들지 않는다.
+     */
+    public void dropPrizeOrbs(long playerId, int lostActiveCount) { dropPrizeOrbs(byPlayer.get(playerId), lostActiveCount); }
+
+    /** 멤버 버전(봇은 byPlayer에 없다) */
+    public void dropPrizeOrbs(Member m, int lostActiveCount) {
+        if (m == null) return; // 호출하는 쪽은 키워드를 실제로 잃었을 때만 부른다: 활성이 없었어도 구슬은 최소 1개
+        int count = Math.max(1, lostActiveCount / 2);
+        double half = currentHalf(), expires = clockSeconds + PRIZE_ORB_SECONDS;
+        java.util.random.RandomGenerator rnd = random;
+        for (int i = 0; i < count && prizeOrbs.size() < PRIZE_ORB_MAX; i++) {
+            for (int tries = 0; tries < 8; tries++) {
+                double ang = rnd.nextDouble() * Math.PI * 2;
+                double dist = m.displayRadius + 50 + rnd.nextDouble() * (120 + Math.sqrt(count) * 45);
+                double x = Math.max(-half + ORB_RADIUS, Math.min(half - ORB_RADIUS, m.x + Math.cos(ang) * dist));
+                double y = Math.max(-half + ORB_RADIUS, Math.min(half - ORB_RADIUS, m.y + Math.sin(ang) * dist));
+                if (inSafeZone(x, y, ORB_RADIUS)) continue;
+                int id = nextOrb++;
+                prizeOrbs.put(id, new double[]{x, y, expires});
+                broadcast(RoomMessages.orbSpawn(id, x, y, true));
+                break;
+            }
+        }
+    }
+
+    /** 테스트·관리용: 지금 떠 있는 ! 구슬 수. */
+    public int prizeOrbCount() { return prizeOrbs.size(); }
+
+    /** 테스트용: 그 자리에 ! 구슬을 놓는다. */
+    public int placePrizeOrb(double x, double y) {
+        int id = nextOrb++;
+        prizeOrbs.put(id, new double[]{x, y, clockSeconds + PRIZE_ORB_SECONDS});
+        return id;
+    }
+
+    /**
+     * 목표 개수 = 활동 영역 넓이 × 밀도(상한 orbMax). 맵이 넓어지거나 사람이 늘어 영역이 커지면 같은 비율로 늘어난다(4.20).
+     * 간격마다 목표의 일정 비율(기본 5%, 최소 1개)씩 빈 곳에 만들어서, 넓은 맵도 좁은 맵과 비슷한 시간에 다 찬다.
+     * 영역이 좁아져 밖에 남은 구슬은 지운다.
+     */
+    int orbTarget(Tuning tu, double half) {
+        double millionPx = (half * 2) * (half * 2) / 1_000_000;
+        return (int) Math.min(tu.orbMax(), Math.round(millionPx * tu.orbDensity()));
+    }
+
+
+    private void spawnOrbs(Tuning tu, double half) {
+        Iterator<Map.Entry<Integer, double[]>> it = orbs.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Integer, double[]> o = it.next();
+            if (Math.abs(o.getValue()[0]) > half - ORB_RADIUS || Math.abs(o.getValue()[1]) > half - ORB_RADIUS) {
+                it.remove();
+                broadcast(RoomMessages.orbEaten(o.getKey(), 0));
+            }
+        }
+        int target = orbTarget(tu, half);
+        if (members.isEmpty() || orbs.size() >= target || clockSeconds < nextOrbAt) return;
+        nextOrbAt = clockSeconds + tu.orbSpawnSeconds();
+        int batch = Math.min(target - orbs.size(), Math.max(1, (int) Math.ceil(target * tu.orbSpawnPercent() / 100)));
+        for (int i = 0; i < batch; i++) spawnOneOrb(half);
+    }
+
+    /** 활동 영역 안, 원 바로 위가 아닌 곳에 구슬 하나. 8번 안에 자리를 못 찾으면 이번에는 만들지 않는다. */
+    private void spawnOneOrb(double half) {
+        double margin = 80;
+        for (int tries = 0; tries < 8; tries++) {
+            double x = (random.nextDouble() * 2 - 1) * (half - margin);
+            double y = (random.nextDouble() * 2 - 1) * (half - margin);
+            boolean blocked = inSafeZone(x, y, ORB_RADIUS); // 세이프존 위에는 만들지 않는다(4.22)
+            for (Member m : members.values()) {
+                if (blocked) break;
+                if (Math.hypot(m.x - x, m.y - y) < m.displayRadius + 60) { blocked = true; break; } // 원 바로 위에는 만들지 않는다
+            }
+            if (blocked) continue;
+            int id = nextOrb++;
+            orbs.put(id, new double[]{x, y});
+            broadcast(RoomMessages.orbSpawn(id, x, y, false));
+            return;
+        }
+    }
+
+    private Map<String, Object> orbListMessage() {
+        List<List<Object>> list = new ArrayList<>();
+        orbs.forEach((id, p) -> list.add(List.of(id, p[0], p[1], 0)));
+        prizeOrbs.forEach((id, p) -> list.add(List.of(id, p[0], p[1], 1))); // 마지막 값: 1이면 ! 구슬
+        return RoomMessages.orbs(list);
+    }
+
+    /** 테스트·관리용: 지금 떠 있는 구슬 수. */
+    public int orbCount() { return orbs.size(); }
+
+    /** 테스트용: 그 자리에 구슬을 놓는다. */
+    public int placeOrb(double x, double y) {
+        int id = nextOrb++;
+        orbs.put(id, new double[]{x, y});
+        return id;
+    }
+
+    /** 방의 모두(관전 포함)에게 글 메시지를 보낸다. 방 스레드에서 부른다(긴급 안내처럼 서버 전체 알림, 4.29). */
+    public void announce(Map<String, Object> msg) { broadcast(msg); }
+
+    void broadcast(Map<String, Object> msg) {
+        for (Member m : members.values()) outbox.sendText(m, msg);
+        for (Member sp : spectators) outbox.sendText(sp, msg);
+    }
+
+    private void collide(Tuning tu) {
+        // 공간 격자로 가까운 아이콘끼리만 검사한다. 큰 아이콘은 걸치는 칸 모두에 넣는다.
+        double cell = 200;
+        Map<Long, List<Member>> grid = new HashMap<>();
+        for (Member m : members.values()) {
+            int x0 = (int) Math.floor((m.x - m.displayRadius) / cell), x1 = (int) Math.floor((m.x + m.displayRadius) / cell);
+            int y0 = (int) Math.floor((m.y - m.displayRadius) / cell), y1 = (int) Math.floor((m.y + m.displayRadius) / cell);
+            for (int gx = x0; gx <= x1; gx++) for (int gy = y0; gy <= y1; gy++)
+                grid.computeIfAbsent(((long) gx << 32) ^ (gy & 0xffffffffL), k -> new ArrayList<>()).add(m);
+        }
+        Set<Long> checked = new HashSet<>();
+        for (List<Member> list : grid.values()) {
+            for (int i = 0; i < list.size(); i++) for (int j = i + 1; j < list.size(); j++) {
+                Member a = list.get(i), b = list.get(j);
+                long key = a.entityNo < b.entityNo ? ((long) a.entityNo << 32) | b.entityNo : ((long) b.entityNo << 32) | a.entityNo;
+                if (!checked.add(key)) continue;
+                if (a.dead || b.dead) continue; // 이번 틱에 앞선 싸움에서 죽었다(4.31)
+                // 갈고리(4.33): 끌려오는 원은 쓴 사람과만 부딪히고(무조건), 다른 원과의 충돌은 모두 무효다
+                boolean forced = a.hookedBy == b || b.hookedBy == a;
+                if (!forced && (a.hookedBy != null || b.hookedBy != null)) continue;
+                if (a.safe || b.safe) continue; // 세이프존에서는 겹쳐 있어도 튕기지 않고 키워드도 잃지 않는다(4.22)
+                double dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy), min = a.displayRadius + b.displayRadius;
+                if (d >= min) continue;
+                if (d < 0.001) { dx = 1; dy = 0; d = 1; }
+                double nx = dx / d, ny = dy / d, overlap = min - d;
+                Member big = a.displayRadius >= b.displayRadius ? a : b, small = big == a ? b : a;
+                double ratio = big.displayRadius / small.displayRadius;
+                double sign = small == b ? 1 : -1; // small을 big에서 멀어지는 방향으로
+                // 무적(잃은 뒤·입장·리스폰 직후 보호)인 원은 유령처럼 다른 원과 충돌하지 않고 통과한다(4.3): 밀거나 튕기지 않고 싸움도 없다
+                if (!forced && (a.protectUntil > clockSeconds || b.protectUntil > clockSeconds)) continue;
+                boolean aHot = isFlame(a), bHot = isFlame(b);
+                Member pusher = null, pushed = null; // 상대를 튕겨 낸 쪽과 튕겨 나간 쪽(같이 튕기면 없다)
+                if (aHot != bHot) {
+                    // 불꽃이 불꽃 아닌 쪽과 부딪히면(이기는 쪽은 크기와 상관없이 불꽃, 4.25) 물리도 같게 한다: 불꽃은 제자리에 있고 불꽃 아닌 쪽만
+                    // 밀려난다(작은 불꽃이 이기면서 튕겨 나가는 어색함을 없앤다). 튕김 세기는 일반 충돌과 같다
+                    Member hot = aHot ? a : b, cold = hot == a ? b : a;
+                    double away = cold == b ? 1 : -1; // cold를 hot에서 멀어지는 방향으로
+                    cold.x += away * nx * overlap; cold.y += away * ny * overlap;
+                    double base = hot.displayRadius >= cold.displayRadius ? Math.min(hot.displayRadius / cold.displayRadius, tu.knockbackCap()) : 1;
+                    knock(cold, away * nx, away * ny, base, tu);
+                    cold.targetX = null;
+                    pusher = hot; pushed = cold;
+                } else if (ratio < tu.bigRatio()) {
+                    a.x -= nx * overlap / 2; a.y -= ny * overlap / 2;
+                    b.x += nx * overlap / 2; b.y += ny * overlap / 2;
+                    knock(a, -nx, -ny, 1, tu); knock(b, nx, ny, 1, tu);
+                    a.targetX = null; b.targetX = null; // 같이 튕기면 둘 다 목표 해제
+                    combos.bounce(a, b);                // 서로 튕겨 나갔으니 둘 다 콤보를 잃는다(4.25)
+                } else {
+                    small.x += sign * nx * overlap; small.y += sign * ny * overlap;
+                    knock(small, sign * nx, sign * ny, Math.min(ratio, tu.knockbackCap()), tu); small.targetX = null;
+                    pusher = big; pushed = small;
+                }
+                boolean aFlame = isFlame(a), bFlame = isFlame(b); // 이 충돌의 불꽃 여부는 콤보를 고치기 전 값으로 정한다(튕긴 뒤 콤보가 달라져도 판정이 바뀌지 않게)
+                if (pusher != null) combos.knock(pusher, pushed, key); // 튕겨 낸 쪽 콤보 +1, 튕겨 나간 쪽 콤보 0
+                if (hpDuel(a, b, key, aFlame, bFlame)) continue; // 체력이 0이 된 사람이 있으면 죽음이 싸움 결과까지 처리했다(키워드를 두 번 잃지 않는다)
+                if (aFlame != bFlame) {
+                    // 불꽃이 붙은 쪽(사람·봇)이 불꽃 없는 쪽과 부딪히면 점수와 상관없이 이기고, 상대는 키워드를 모두 잃는다(4.25)
+                    Member hot = aFlame ? a : b, cold = hot == a ? b : a;
+                    if (cold.protectUntil <= clockSeconds && cold.bot && !cold.botKeywords.isEmpty()) {
+                        botWipe(cold, hot, tu, hpTuning.flameLosePercent()); // 봇의 (메모리) 키워드를 일부(비율은 설정, 100이면 모두) 잃는다(4.36)
+                    } else if (cold.protectUntil <= clockSeconds && !cold.bot && !cold.keywords.isEmpty()) {
+                        cold.protectUntil = clockSeconds + tu.loseProtectSeconds();
+                        invincible(cold, tu);
+                        outbox.requestLoss(this, KeywordLoss.flame(cold, hot, hpTuning.flameLosePercent())); // 이긴 쪽이 봇이어도 잃는다(비율은 설정, 100이면 모두, 4.36)
+                    } else if (cold.protectUntil <= clockSeconds) {
+                        cold.protectUntil = clockSeconds + tu.loseProtectSeconds(); // 키워드가 없어도 졌으니 무적이 붙는다. 죽음은 체력이 0이 될 때만 온다(4.36)
+                        invincible(cold, tu);
+                    }
+                // 현재 유행도가 낮은 쪽이 키워드 하나를 잃는다(4.3). 같으면 없음. 둘 다 불꽃이어도 이 규칙이다
+                } else if (effScore(a) != effScore(b)) { // 광폭화는 유행도에 잃은 체력 비율만큼 곱해 비교한다(표시값은 그대로)
+                    Member loser = effScore(a) < effScore(b) ? a : b, winner = loser == a ? b : a;
+                    if (loser.protectUntil <= clockSeconds && loser.bot && !loser.botKeywords.isEmpty()) {
+                        loser.protectUntil = clockSeconds + tu.loseProtectSeconds();
+                        BotKw lost = botLose(loser, tu); // 봇도 사람처럼 (메모리의) 실제 키워드 하나를 잃는다(4.21)
+                        invincible(loser, tu);
+                        // 이긴 사람은 봇이 잃은 바로 그 키워드를 빼앗고, 이긴 쪽이 봇이면 그 키워드가 그 봇의 메모리 목록에 들어간다
+                        if (!winner.bot) outbox.requestLoss(this, KeywordLoss.fromBot(KeywordLoss.Cause.FIGHT, loser, winner, lost.id()));
+                        else botGain(winner, lost.id());
+                    } else if (loser.protectUntil <= clockSeconds && !loser.keywords.isEmpty()) {
+                        loser.protectUntil = clockSeconds + tu.loseProtectSeconds();
+                        invincible(loser, tu);
+                        outbox.requestLoss(this, KeywordLoss.fight(loser, winner)); // 이긴 쪽이 봇이어도 잃는다
+                    } else if (loser.protectUntil <= clockSeconds) {
+                        loser.protectUntil = clockSeconds + tu.loseProtectSeconds(); // 잃을 키워드가 없어도 졌으니 무적이 붙는다. 죽음은 체력이 0이 될 때만 온다(4.36): 체력이 1%라도 남으면 산다
+                        invincible(loser, tu);
+                    }
+                } else {
+                    tieCollision(a, b, key); // 유행도가 같으면 누구도 잃지 않는다. 사람의 "같은 유행도와 부딪힌 횟수"만 센다(4.3)
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ 체력(4.36)
+
+    private final Map<Long, Double> hpHitAt = new HashMap<>();
+    private boolean hpPublicDirty;
+    private double hpSentAt;
+
+    private static double round2(double v) { return Math.round(v * 100) / 100.0; }
+
+    /** 공격자(att)가 상대(vic)를 한 번 쳤을 때의 피해(점): 100 × 공격력 ÷ (공격력 + 상대 유행도). 공격자가 불꽃이면 공격력은 항상 유행도 × 배수다. 소수 둘째 자리까지 반올림 */
+    double hpDamage(Member att, Member vic) {
+        double atk = effScore(att) * (isFlame(att) ? hpTuning.flameMultiplier() : 1), v = vic.score;
+        double ratio = atk + v <= 0 ? 0.5 : atk / (atk + v); // 둘 다 0이면 반반
+        return round2(100.0 * ratio);
+    }
+
+    /** 체력이 최대인 상태에서 현재 %(올림, 살아 있으면 최소 1) */
+    private int hpPercent(Member m) {
+        double max = Math.max(0.01, hpTuning.max());
+        return m.hp <= 0 ? 0 : (int) Math.max(1, Math.min(100, Math.ceil(m.hp / max * 100 - 1e-9)));
+    }
+
+    Map<String, Object> hpMessage(Member m, double healedPercent) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("type", "hp"); msg.put("e", m.entityNo); msg.put("hp", round2(m.hp)); msg.put("max", hpTuning.max()); msg.put("pct", hpPercent(m));
+        if (healedPercent > 0) msg.put("heal", round2(healedPercent));
+        return msg;
+    }
+
+    /** 체력이 바뀌었다: 본인에게 알리고(공개 설정이면 아래 hps에서 모두에게도) */
+    private void markHp(Member m) {
+        m.hpDirty = true;
+    }
+
+    /** 세이프존에서 회복하고, 최대 체력이 바뀌었으면 맞추고, 바뀐 체력을 0.25초마다 모아 알린다 */
+    private void updateHp(double dt) {
+        HpTuning hp = hpTuning;
+        if (!hp.enabled()) return;
+        double c = centerSize / 2;
+        for (Member m : members.values()) {
+            if (m.hp > hp.max()) { m.hp = hp.max(); markHp(m); }
+            // 세이프존 회복은 1초에 한 번 통째로(매 틱 조금씩이 아니라): 계산 부담도 줄고 "1초마다 2%"로 알아보기 쉽다
+            boolean inCenter = Math.abs(m.x) <= c && Math.abs(m.y) <= c; // 시간제로 생기는 무작위 세이프존은 회복하지 않는다
+            if (tick % 20 == 0 && inCenter && hp.safeRegenPercent() > 0 && m.hp < hp.max()) {
+                healPercent(m, hp.safeRegenPercent()); // 회복 알림({hp, heal})도 같이 나가 다른 회복처럼 + 표시가 뜬다
+            }
+        }
+        if (tick % 5 != 0) return;
+        boolean any = hpPublicDirty;
+        for (Member m : members.values()) {
+            if (!m.hpDirty) continue;
+            m.hpDirty = false; any = true;
+            if (!m.bot) outbox.sendText(m, hpMessage(m, 0));
+        }
+        if (any && hp.publicBars()) {
+            List<List<Integer>> list = new ArrayList<>();
+            for (Member m : members.values()) if (hpPercent(m) < 100) list.add(List.of(m.entityNo, hpPercent(m)));
+            broadcast(RoomMessages.hps(list));
+        }
+        hpPublicDirty = false;
+    }
+
+    /** 사람이 키워드를 새로 얻었다(서비스 이벤트): 그 키워드 점수가 얻은 뒤 내 유행도에서 차지하는 %만큼 최대 체력의 %로 회복한다(상한 없음, 최대 체력까지) */
+    public void applyKeywordGain(long playerId, long keywordScore, long totalScore) {
+        healFromKeyword(byPlayer.get(playerId), keywordScore, totalScore);
+    }
+
+    private void healFromKeyword(Member m, double keywordScore, double totalScore) {
+        HpTuning hp = hpTuning;
+        if (m == null || m.dead || !hp.enabled() || keywordScore <= 0 || totalScore <= 0 || m.hp >= hp.max()) return;
+        healPercent(m, Math.min(100.0, 100.0 * keywordScore / totalScore));
+    }
+
+    /** 최대 체력의 pct%만큼 회복한다(최대 체력까지). 바뀌면 본인에게 알리고 공개 체력바를 갱신한다 */
+    void healPercent(Member m, double pct) {
+        HpTuning hp = hpTuning;
+        double before = m.hp;
+        m.hp = Math.min(hp.max(), round2(m.hp + hp.max() * pct / 100.0));
+        if (m.hp <= before) return;
+        m.hpDirty = true; hpPublicDirty = true;
+        if (!m.bot) outbox.sendText(m, hpMessage(m, (m.hp - before) / hp.max() * 100));
+    }
+
+    /**
+     * 처치 회복: 쓰러뜨린 쪽(사람·봇)이 처치당한 사람 유행도와 내 유행도의 비율만큼 회복한다 — 100 × 처치당한 ÷ (처치당한 + 내) × killHealPercent%.
+     * 비슷한 상대는 절반, 나보다 훨씬 약한 상대는 조금, 훨씬 센 상대를 쓰러뜨리면 거의 가득 찬다(약자의 역전 보상).
+     */
+    private void healOnKill(Member killer, Member victim) {
+        HpTuning hp = hpTuning;
+        if (!hp.enabled() || hp.killHealPercent() <= 0 || killer.dead || killer.hp >= hp.max()) return;
+        double v = Math.max(0, victim.score), a = Math.max(0, killer.score);
+        double ratio = v + a <= 0 ? 0.5 : v / (v + a);
+        healPercent(killer, 100.0 * ratio * hp.killHealPercent() / 100.0);
+    }
+
+    /**
+     * 사람끼리 부딪혔을 때의 체력 싸움. 서로 상대 유행도 비율만큼 깎는다(불꽃 쪽 반격은 설정). 같은 두 사람은 hp_hit_seconds에 한 번만 깎는다.
+     * 둘 다 0이 되면 더 크게 맞은 쪽만 죽고 다른 쪽은 1%로 남는다. 누가 죽으면 true(그 싸움의 키워드 판정은 죽음이 처리했다).
+     */
+    private boolean hpDuel(Member a, Member b, long pairKey, boolean aFlame, boolean bFlame) {
+        HpTuning hp = hpTuning;
+        if (!hp.enabled() || a.dead || b.dead) return false;
+        Double last = hpHitAt.get(pairKey);
+        if (last != null && clockSeconds - last < hp.hitSeconds()) return false;
+        hpHitAt.put(pairKey, clockSeconds);
+        if (hpHitAt.size() > 512) hpHitAt.values().removeIf(t -> clockSeconds - t >= hp.hitSeconds());
+        double toA = modifyDamage(b, a, hpDamage(b, a)), toB = modifyDamage(a, b, hpDamage(a, b)); // 공격 증폭·피해 감소 적용
+        if (aFlame != bFlame && !hp.flameCounter()) { if (aFlame) toA = 0; else toB = 0; } // 불꽃은 반격 피해를 받지 않는다
+        boolean aDies = round2(a.hp - Math.max(0, toA - barrierPoints(a))) <= 0, bDies = round2(b.hp - Math.max(0, toB - barrierPoints(b))) <= 0; // 쉴드가 먼저 받는다
+        if (aDies && bDies) {
+            boolean aOut = toA > toB || (toA == toB && a.score <= b.score);
+            if (aOut) bDies = false; else aDies = false;
+        }
+        hurt(a, b, toA, aDies);
+        hurt(b, a, toB, bDies);
+        if (aDies) hpKill(a, b);
+        if (bDies) hpKill(b, a);
+        return aDies || bDies;
+    }
+
+    // ------------------------------------------------------------ 버프·보호막·광폭화(4.33)
+
+    boolean amplified(Member m) { return m.amplifyUntil > clockSeconds; }
+    boolean fortified(Member m) { return m.fortifyUntil > clockSeconds; }
+    boolean hasBarrier(Member m) { return m.barrier > 0 && m.barrierUntil > clockSeconds; }
+    double barrierPoints(Member m) { return hasBarrier(m) ? m.barrier : 0; }
+
+    /** 잃은 체력 비율(0~1). 체력 방식이 꺼져 있으면 0 */
+    double lostFraction(Member m) {
+        if (!hpTuning.enabled()) return 0;
+        return clamp(1 - m.hp / Math.max(0.01, hpTuning.max()), 0, 1);
+    }
+    double lostPercent(Member m) { return round2(lostFraction(m) * 100); }
+
+    /** 충돌·피해 판정에 쓰는 유행도: 광폭화 중이면 잃은 체력 비율만큼 곱한다(표시값은 그대로) */
+    double effScore(Member m) { return m.berserk ? m.score * (1 + lostFraction(m)) : m.score; }
+
+    /** 체력 피해에 버프를 건다: 때린 쪽이 공격 증폭이면 amplify_multiplier배, 맞은 쪽이 피해 감소이면 fortify_percent%. att는 보스처럼 원이 아니면 null */
+    double modifyDamage(Member att, Member vic, double dmg) {
+        if (att != null && amplified(att)) dmg *= skillConfig.param("amplify_multiplier");
+        if (fortified(vic)) dmg *= skillConfig.param("fortify_percent") / 100.0;
+        return round2(dmg);
+    }
+
+    /** 보호막이 피해를 먼저 받는다. 남은 피해(체력에 들어갈 몫)를 돌려주고, 쉴드 양을 모두에게 알린다. 다 닳으면 깨진다 */
+    double absorb(Member victim, double dmg) {
+        if (!hasBarrier(victim) || dmg <= 0) return dmg;
+        double take = Math.min(victim.barrier, dmg), max = Math.max(0.01, hpTuning.max());
+        victim.barrier = round2(victim.barrier - take);
+        if (victim.barrier <= 0.0001) { victim.barrier = 0; victim.barrierUntil = 0; broadcast(SkillFx.barrierEnd(victim.entityNo, true)); }
+        else broadcast(SkillFx.barrierHit(victim.entityNo, round2(victim.barrier / max * 100)));
+        return round2(dmg - take);
+    }
+
+    void berserkOff(Member m) {
+        if (!m.berserk) return;
+        m.berserk = false;
+        broadcast(SkillFx.buffEnd("berserk", m.entityNo));
+    }
+
+    /** 원이 방에서 빠질 때(나감·죽음) 버프·보호막·광폭화 표시를 지운다 */
+    private void endBuffs(Member m) {
+        if (amplified(m)) broadcast(SkillFx.buffEnd("amplify", m.entityNo));
+        if (fortified(m)) broadcast(SkillFx.buffEnd("fortify", m.entityNo));
+        if (hasBarrier(m)) broadcast(SkillFx.barrierEnd(m.entityNo, false));
+        m.amplifyUntil = 0; m.fortifyUntil = 0; m.barrier = 0; m.barrierUntil = 0;
+        berserkOff(m);
+    }
+
+    /**
+     * 한 틱: 끝난 버프·보호막을 정리하고(끝났다고 모두에게 알림), 광폭화는 1초마다 최대 체력의 berserk_drain_percent%를 잃는다.
+     * 체력이 berserk_min_hp_percent% 아래로 내려가게 되면 깎지 않고 스스로 꺼진다(죽지 않는다). 광폭화는 쉴드를 거치지 않는 자해라 보호막과 상관없다.
+     */
+    private void updateBuffs() {
+        double now = clockSeconds;
+        for (Member m : members.values()) {
+            if (m.amplifyUntil > 0 && m.amplifyUntil <= now) { m.amplifyUntil = 0; broadcast(SkillFx.buffEnd("amplify", m.entityNo)); }
+            if (m.fortifyUntil > 0 && m.fortifyUntil <= now) { m.fortifyUntil = 0; broadcast(SkillFx.buffEnd("fortify", m.entityNo)); }
+            if (m.barrierUntil > 0 && m.barrierUntil <= now) { m.barrier = 0; m.barrierUntil = 0; broadcast(SkillFx.barrierEnd(m.entityNo, false)); }
+            if (!m.berserk) continue;
+            if (!hpTuning.enabled() || m.dead) { berserkOff(m); continue; }
+            if (now < m.berserkNextAt) continue;
+            m.berserkNextAt += 1.0;
+            double max = hpTuning.max(), drain = max * skillConfig.param("berserk_drain_percent") / 100.0, min = max * skillConfig.param("berserk_min_hp_percent") / 100.0;
+            if (m.hp - drain < min) { berserkOff(m); continue; }
+            m.hp = round2(m.hp - drain);
+            markHp(m); hpPublicDirty = true;
+            broadcast(RoomMessages.hpHit(m.entityNo, -1, round2(drain / max * 100), hpPercent(m)));
+            broadcast(SkillFx.berserk(m.entityNo, lostPercent(m)));
+        }
+    }
+
+    /** victim의 체력을 dmg점 깎는다. lethal이면 0, 아니면 최소 1%는 남긴다. 맞은 것을 모두에게 알린다({hpHit}: 맞은 원, 때린 원, 깎인 %, 남은 %) */
+    private void hurt(Member victim, Member by, double dmg, boolean lethal) {
+        if (dmg <= 0) return;
+        double total = dmg;                      // 쉴드가 막은 몫까지 합친 피해(화면에는 이 전체를 평소처럼 한 숫자로 보인다)
+        dmg = absorb(victim, dmg);               // 보호막(쉴드)이 먼저 받고 남는 피해만 체력에 들어간다
+        double absorbed = total - dmg;
+        double max = hpTuning.max(), minAlive = round2(max / 100.0);
+        if (dmg <= 0 && !lethal) { broadcast(RoomMessages.hpHit(victim.entityNo, by.entityNo, round2(Math.min(100.0, total / max * 100)), hpPercent(victim))); return; }
+        double before = victim.hp;
+        victim.hp = lethal ? 0 : Math.max(minAlive, round2(victim.hp - dmg));
+        markHp(victim); hpPublicDirty = true;
+        double lost = lethal ? dmg : Math.min(dmg, before - victim.hp); // 살아 남으면 실제로 줄어든 만큼만 알린다(1% 하한에 걸려도 -100%로 보이지 않게)
+        broadcast(RoomMessages.hpHit(victim.entityNo, by.entityNo, round2(Math.min(100.0, (lost + absorbed) / max * 100)), hpPercent(victim)));
+    }
+
+    /** 체력이 0이 되었다: 가진 키워드의 death_lose_percent%를 한 번만 잃고(이미 불꽃에게 잃었어도 이 싸움에서는 다시 잃지 않는다) 죽는다 */
+    private void hpKill(Member victim, Member killer) {
+        victim.hp = 0;
+        if (!victim.bot) outbox.requestLoss(this, KeywordLoss.death(victim, killer, hpTuning.deathLosePercent()));
+        else botHalveOnDeath(victim, killer); // 봇도 사람처럼 키워드의 일부를 잃고 ! 구슬이 떨어진다(방 메모리에서만, DB 없음)
+        die(victim, killer, true);
+    }
+
+    /** 같은 두 원은 이 시간(초) 안에 다시 부딪혀도 한 번만 센다(겹친 채 붙어 있거나 곧바로 다시 닿아 몇 번씩 세지 않게) */
+    static final double TIE_COUNT_COOLDOWN = 1.0;
+    private final Map<Long, Double> tieAt = new HashMap<>();
+
+    /** 현재 유행도가 같은 두 원이 부딪혔다: 사람인 쪽마다 횟수를 센다(칭호 "도토리 키재기"). 같은 짝은 TIE_COUNT_COOLDOWN초에 한 번만 센다. */
+    private void tieCollision(Member a, Member b, long pairKey) {
+        Double last = tieAt.get(pairKey);
+        if (last != null && clockSeconds - last < TIE_COUNT_COOLDOWN) return;
+        tieAt.put(pairKey, clockSeconds);
+        if (tieAt.size() > 512) tieAt.values().removeIf(t -> clockSeconds - t >= TIE_COUNT_COOLDOWN); // 오래된 짝은 지운다
+        if (!a.bot) outbox.requestTie(this, a);
+        if (!b.bot) outbox.requestTie(this, b);
+    }
+
+    /**
+     * 대시(4.27): 쿨타임이 지났으면 가만히 있을 때도 시작한다. 시작하면 본인에게 {dash: 지속 ms, 쿨타임 ms, 배수}를 알려
+     * 클라이언트 예측이 같은 속도로 가게 하고, 모두에게 {dashFx: 원 번호, 지속 ms}를 보내 그 원에 강조 효과를 그리게 한다. 쿨타임 중이거나 쓸 수 없으면 아무 일도 없다.
+     */
+    public void dash(Member m) {
+        if (m.bot || members.get(m.entityNo) != m || held(m) || status.rooted(m) || disabledSkills.contains("dash")) return; // 끌려오는 동안·속박 중에는 쓸 수 없다(4.33)
+        if (!equippedSkills(m).contains("dash")) return; // 대시도 칸에 장착해야 쓴다(4.27)
+        DashTuning d = dashTuning;
+        if (clockSeconds < m.dashReadyAt) return;
+        if (!unlocked(m, "dash")) return;
+        if (d.seconds() <= 0 || d.multiplier() <= 1) return; // 가만히 있을 때도 쓴다(대시 시간 동안 움직이면 빠르다)
+        m.dashUntil = clockSeconds + d.seconds();
+        m.dashReadyAt = clockSeconds + Math.max(d.seconds(), d.cooldownSeconds());
+        outbox.sendText(m, RoomMessages.dash(SkillFx.ms(d.seconds()), SkillFx.ms(Math.max(d.seconds(), d.cooldownSeconds())), d.multiplier()));
+        broadcast(RoomMessages.dashFx(m.entityNo, SkillFx.ms(d.seconds()))); // 모두의 화면에 대시 강조 효과(4.27)
+    }
+
+    // ------------------------------------------------------------ 스킬(4.33)
+
+    /**
+     * 스킬을 쓴다. id는 SKILLS의 코드, (ax, ay)는 겨눈 세계 좌표(갈고리만 쓴다. 없으면 가던 방향). 쿨타임 중이거나 끌려오는 중이면 아무 일도 없다.
+     * 충격파·갈고리는 세이프존 안에서 쓸 수 없다(세이프존에서 공격하지 못하게, 이때는 {skillFail}). 성공하면 본인에게 {skill: id, cooldownMs}를 알리고,
+     * 모두에게 {skillFx}를 보내 쓴 것이 보이게 한다.
+     */
+    public void skill(Member m, String id, double ax, double ay) {
+        id = skillCode(id);
+        int idx = SKILLS.indexOf(id);
+        PlayerSkill s = skills.get(id);
+        if (idx < 0 || s == null || m.bot || m.dead || m.offline || !inRoom(m) || (held(m) && !s.usableWhileHeld()) || disabledSkills.contains(id)) return;
+        if (status.silenced(m) && !s.usableWhileHeld()) { tell(m, SkillFx.fail(id, "silenced")); return; } // 침묵: 스킬을 쓰지 못한다(정화만 된다)
+        if (clockSeconds < m.skillReadyAt[idx]) return;
+        if (!unlocked(m, id)) return; // 해금 레벨이 안 되면 쓰지 못한다(서버가 판정)
+        if (!equippedSkills(m).contains(id)) { tell(m, SkillFx.fail(id, "unequipped")); return; } // 장착해야만 쓴다(4.33)
+        if (s.offensive() && m.safe) { tell(m, SkillFx.fail(id, "safe")); return; } // 세이프존에서는 남을 공격하지 못한다
+        if (!s.cast(m, ax, ay)) return;
+        if (s.offensive()) breakStealth(m);
+        double cooldown = skillConfig.cooldown(id);
+        m.skillReadyAt[idx] = clockSeconds + cooldown;
+        tell(m, SkillFx.used(id, SkillFx.ms(cooldown), SkillFx.ms(skillConfig.activeSeconds(id))));
+    }
+
+    // ---- 스킬 장착(4.33)
+
+    /**
+     * 칸에 장착할 수 있는 스킬인가. 서버 규칙이 있는 스킬(SKILLS)뿐 아니라 DB(skills)에만 먼저 등록된 스킬(속박·증폭 등 규칙이 아직 없는 새 스킬)도 해금되고
+     * 켜져 있으면 장착된다(안 그러면 서버가 장착 요청을 거절하고 옛 장착을 되돌려 보내 "장착이 안 되는" 것처럼 보였다). 쓰는 일은 SKILLS에 있는 스킬만 한다.
+     */
+    private boolean usableSkill(Member m, String id) {
+        return ("dash".equals(id) || SKILLS.contains(id) || knownSkills.contains(id)) && !disabledSkills.contains(id) && m.level >= requiredLevels.getOrDefault(id, 1);
+    }
+
+    /**
+     * 고른 적 없는 사람의 기본 장착(칸 순서대로, 빈 칸은 null): 1번 칸에 대시, 2번 칸부터 해금된 스킬이 해금 레벨 순서(같으면 SKILLS 순서)대로
+     * 하나씩 채워진다(2~5번). 새 스킬이 해금될 때마다 다음 빈 칸이 채워진다. 칸을 한 번이라도 바꾸면(setLoadout) 그 뒤로는 고른 대로 둔다.
+     */
+    private String[] defaultLoadout(Member m) {
+        String[] out = new String[skillSlots];
+        List<String> unlocked = SKILLS.stream().filter(id -> usableSkill(m, id))
+                .sorted(Comparator.<String>comparingInt(id -> requiredLevels.getOrDefault(id, 1)).thenComparingInt(SKILLS::indexOf)).toList();
+        if (usableSkill(m, "dash")) out[0] = "dash";
+        for (int i = 1; i < skillSlots && i - 1 < unlocked.size(); i++) out[i] = unlocked.get(i - 1);
+        return out;
+    }
+
+    /** 칸 순서대로 지금 쓸 수 있는 장착(해금되고 켜져 있는 것만, 못 쓰는 칸은 null) */
+    private String[] currentLoadout(Member m) {
+        String[] lo = m.loadout == null ? defaultLoadout(m) : m.loadout;
+        String[] out = new String[skillSlots];
+        for (int i = 0; i < skillSlots && i < lo.length; i++) out[i] = lo[i] != null && usableSkill(m, lo[i]) ? lo[i] : null;
+        return out;
+    }
+
+    /** 지금 장착해서 쓸 수 있는 스킬(대시 포함, 해금되고 켜져 있는 것만). 고른 적 없으면 기본 장착(defaultLoadout)이다. */
+    public List<String> equippedSkills(Member m) {
+        List<String> out = new ArrayList<>();
+        for (String id : currentLoadout(m)) if (id != null && !out.contains(id)) out.add(id);
+        return out;
+    }
+
+    /** 클라이언트에 보내는 장착 칸(대시 포함 5칸, 빈 칸은 null). 입장할 때와 바뀔 때마다 보낸다 */
+    public Map<String, Object> loadoutMessage(Member m) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("type", "loadout"); msg.put("slots", Arrays.asList(currentLoadout(m)));
+        return msg;
+    }
+
+    /** 저장된 값(칸 순서대로 스킬 코드, 빈 칸 null)으로 장착을 복원한다. 모르는 코드는 빈 칸이 되고, null이면 고른 적 없는 상태로 둔다. */
+    public void restoreLoadout(Member m, List<String> saved) {
+        if (saved == null) { m.loadout = null; return; }
+        String[] lo = new String[skillSlots];
+        for (int i = 0; i < skillSlots && i < saved.size(); i++) lo[i] = saved.get(i) != null && ("dash".equals(saved.get(i)) || SKILLS.contains(saved.get(i)) || knownSkills.contains(saved.get(i))) ? saved.get(i) : null;
+        m.loadout = lo;
+    }
+
+    /**
+     * 장착을 바꾼다. slots는 skillSlotCount()칸(빈 칸은 null·빈 문자열)이고, 모르는 스킬·아직 해금 안 된 스킬·같은 스킬 중복이 있으면 아무것도 바꾸지 않고
+     * 지금 장착을 다시 알려 준다. 쿨타임은 스킬마다 따로 세므로 바꿔도 풀리지 않는다.
+     */
+    public void setLoadout(Member m, List<String> slots) {
+        if (m.bot || slots == null || slots.size() != skillSlots) { outbox.sendText(m, loadoutMessage(m)); return; }
+        String[] lo = new String[skillSlots];
+        Set<String> seen = new HashSet<>();
+        for (int i = 0; i < skillSlots; i++) {
+            String id = skillCode(slots.get(i));
+            if (id == null || id.isBlank()) continue;
+            if (!usableSkill(m, id) || !seen.add(id)) { outbox.sendText(m, loadoutMessage(m)); return; }
+            lo[i] = id;
+        }
+        m.loadout = lo;
+        outbox.sendText(m, loadoutMessage(m));
+        outbox.saveSkillSlots(this, m, Arrays.asList(lo));
+    }
+
+    /**
+     * 다시 들어온(이어받은) 사람에게 알리는 지금 쿨타임(4.33): 새로고침해서 화면이 비어도 스킬·대시가 아직 쿨타임이면 남은 시간을 다시 보여 주려는 것이다.
+     * 쿨타임은 서버가 Member에 들고 있으므로 새로고침으로 풀리지 않는다. 쿨타임 중인 것이 없으면 null. {cooldowns, skills: {코드: 남은 ms}, dashActiveMs, dashReadyMs, dashMult}
+     */
+    public Map<String, Object> cooldownsMessage(Member m) {
+        Map<String, Long> skillsLeft = new LinkedHashMap<>();
+        for (int i = 0; i < SKILLS.size(); i++) {
+            long ms = Math.round((m.skillReadyAt[i] - clockSeconds) * 1000);
+            if (ms > 0) skillsLeft.put(SKILLS.get(i), ms);
+        }
+        long dashActive = Math.max(0, Math.round((m.dashUntil - clockSeconds) * 1000)), dashReady = Math.max(0, Math.round((m.dashReadyAt - clockSeconds) * 1000));
+        if (skillsLeft.isEmpty() && dashReady == 0) return null;
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("type", "cooldowns"); msg.put("skills", skillsLeft);
+        msg.put("dashActiveMs", dashActive); msg.put("dashReadyMs", dashReady); msg.put("dashMult", dashTuning.multiplier());
+        return msg;
+    }
+
+    // ---- 스킬이 쓰는 방의 도구(4.33). 스킬 클래스(PlayerSkill)는 같은 패키지에서 이것들만 부른다
+
+    /** 방 시계(초) */
+    double now() { return clockSeconds; }
+    /** 방 안의 원(사람·봇, 관전자 제외) */
+    /** 방의 원들(복사본). 스킬 히트가 체력을 0으로 만들면 반복 도중 원이 방에서 빠지므로 복사본을 돌린다 */
+    Collection<Member> all() { return new ArrayList<>(members.values()); }
+    /** 아직 이 방에 있는 그 원인지(나갔다 다시 들어오면 다른 Member다) */
+    boolean inRoom(Member m) { return members.get(m.entityNo) == m; }
+    /** 방에 있고 살아 있는지 */
+    boolean present(Member m) { return inRoom(m) && !m.dead; }
+    /** 지금 가진 키워드 수(봇은 방 메모리의 것). 스킬이 실제로 잃게 할 수 있는 개수를 알 때 쓴다 */
+    int keywordCount(Member m) { return m.bot ? m.botKeywords.size() : m.keywords.size(); }
+    /** 본인에게만 보낸다(봇에게는 보내지 않는다) */
+    void tell(Member m, Map<String, Object> msg) { if (!m.bot) outbox.sendText(m, msg); }
+    StatusEffects status() { return status; }
+    Collection<PlayerSkill> playerSkills() { return skills.all(); }
+    int nextBoltId() { return nextBoltId++; }
+
+    /**
+     * by가 t에게 스킬을 맞힐 수 있는지: 자기 자신·죽은 원·세이프존 안·무적(무적 스킬·잃은 뒤 무적)·정화 직후 면역인 원은 맞지 않는다.
+     * 모든 스킬 판정이 이 조건을 같이 쓰고, 스킬마다 다른 조건(끌려오는 원 제외 등)은 그 스킬이 더한다.
+     */
+    boolean targetable(Member by, Member t) {
+        return t != by && !t.dead && !t.safe && t.protectUntil <= clockSeconds && t.ccImmuneUntil <= clockSeconds;
+    }
+
+    /** 키워드를 잃은 뒤 무적(4.3)을 준다. 이미 무적이면 그대로 둔다 */
+    void protectAfterLoss(Member m) {
+        if (m.protectUntil > clockSeconds) return;
+        m.protectUntil = clockSeconds + tuning.loseProtectSeconds();
+        invincible(m, tuning);
+    }
+
+    /**
+     * 화면에서 보이는 길이(px)를 이 원 크기의 월드 길이로 바꾼다. 클라이언트 줌(`1 / (1 + (r − 최소 반지름) / zoom_factor)`)의 역수를 곱하므로
+     * 갈고리·투사체가 원 크기와 상관없이 화면에서 같은 길이로 보인다(작은 화면의 줌 상한 등으로 실제 화면은 조금 다를 수 있다).
+     */
+    double reachWorld(double screenPx, double radius) {
+        return screenPx * (1 + Math.max(0, radius - tuning.minRadius()) / Math.max(1, tuning.zoomFactor()));
+    }
+
+    /** 지금 날아가는 투사체 수(테스트용) */
+    int boltCount() { return skills.flyingBolts(); }
+
+    /** 갈고리에 끌려오거나 스턴인 중: 움직이지도 스킬을 쓰지도 못한다(정화만 쓴다) */
+    private boolean held(Member m) { return m.hookedBy != null || status.stunned(m); }
+
+    /**
+     * 스킬 히트 하나(4.25, 4.33). 스킬이 사람을 맞히는 길은 모두 여기를 지난다(쇠창살·슬로우·암흑·침묵·스턴·혼란·독·화염구·충격파·흡수 + 장판·터지는 총알).
+     * 한 번의 히트는 세 가지를 같은 순서로 한다. 각 단계의 규칙은 아래 메서드가 맡는다.
+     *  1) 콤보(Combos.hit): 맞힌 쪽 +1, 맞은 쪽 0. 히트 하나에 한 번뿐이고 2)·3)이 따로 올리지 않는다.
+     *  2) 체력 피해(skillDamage): 몸싸움 피해의 skill_hit_damage_percent%, 모든 스킬 같음. 이 피해로 죽으면 키워드는 죽음 규칙만 적용하고 3)은 하지 않는다.
+     *  3) 키워드 잃기(skillKeywordLoss): 히트 하나에 count개(충격파만 설정 quake_drop_keywords, 나머지는 1). 쇠창살·흡수는 맞힌 사람이 그 키워드를 빼앗고
+     *     나머지는 아무도 가져가지 않는다(KeywordLoss.Cause가 정한다, skillCode는 스킬 코드).
+     * 잃은 뒤 무적은 주지 않는다(무적은 몸싸움에서 잃었을 때만 자동으로 붙는다). 실제로 키워드를 잃게 되면 true(사람은 DB가 틱 밖에서 처리하므로 가진 것이 있는지로 본다).
+     */
+    boolean skillHit(Member attacker, Member victim, String skillCode, int count) {
+        combos.hit(attacker, victim);
+        boolean live = attacker != null && present(attacker);
+        if (live && skillDamage(attacker, victim)) return false;
+        return skillKeywordLoss(KeywordLoss.Cause.ofSkill(skillCode), live ? attacker : null, victim, count);
+    }
+
+    /** 히트의 키워드 잃기: victim이 count개를 잃고, 원인이 빼앗는 스킬이면(by가 사람) 맞힌 사람이 그 키워드를 가져간다. by가 null이면(맞힌 사람이 나감·죽음) 떨구기와 같다 */
+    private boolean skillKeywordLoss(KeywordLoss.Cause cause, Member by, Member victim, int count) {
+        boolean steal = cause.way == KeywordLoss.Way.STEAL;
+        if (victim.bot) {
+            boolean lost = false;
+            for (int i = 0; i < count && !victim.botKeywords.isEmpty(); i++) {
+                BotKw kw = botLose(victim, tuning);
+                lost = true;
+                if (steal && by != null && !by.bot) outbox.requestLoss(this, KeywordLoss.fromBot(cause, victim, by, kw.id()));
+            }
+            return lost;
+        }
+        boolean has = !victim.keywords.isEmpty();
+        // 빼앗는 스킬은 하나씩, 떨구는 스킬은 count개를 한 번에(알림 하나). 가진 것이 없으면 빼앗기는 아무 일도 없고, 떨구기는 DB에 맡긴다(방의 목록이 잠깐 늦을 수 있다)
+        if (steal) { if (has) for (int i = 0; i < count; i++) outbox.requestLoss(this, KeywordLoss.skill(cause, victim, by, 1)); }
+        else outbox.requestLoss(this, KeywordLoss.skill(cause, victim, by, count));
+        return has;
+    }
+
+    /**
+     * 충돌에서 victim이 튕겨 나가는 세기(knock의 strength)를 from과 부딪혔다고 보고 구한다: 두 원의 크기 비율이 big_ratio보다 작으면 둘 다 1,
+     * 그 이상이면 작은 쪽만 min(비율, knockback_cap)이고 큰 쪽은 밀리지 않는다(0). 터지는 총알이 터질 때 이 값을 그대로 쓴다.
+     */
+    double collisionKnock(Member from, Member victim) {
+        double big = Math.max(from.displayRadius, victim.displayRadius), small = Math.max(1e-6, Math.min(from.displayRadius, victim.displayRadius));
+        double ratio = big / small;
+        if (ratio < tuning.bigRatio()) return 1;
+        return victim.displayRadius < from.displayRadius ? Math.min(ratio, tuning.knockbackCap()) : 0;
+    }
+
+    /**
+     * 스킬 히트의 체력 피해: 히트 하나에 한 번, **몸싸움이 계산하는 피해(hpDamage)의 skill_hit_damage_percent%**(기본 10%)다. 모든 스킬이 같은 식이다.
+     * 공격 증폭 → 피해 감소 → 보호막 순서는 몸싸움과 같다. 이 피해로 죽었으면 true. 체력 방식이 꺼져 있거나 피해가 0이면 아무 일도 없다.
+     */
+    boolean skillDamage(Member att, Member vic) {
+        double pct = skillConfig.param("skill_hit_damage_percent");
+        if (!hpTuning.enabled() || vic.dead || pct <= 0) return false;
+        double total = modifyDamage(att, vic, round2(hpDamage(att, vic) * pct / 100.0));
+        if (total <= 0) return false;
+        boolean dies = round2(vic.hp - Math.max(0, total - barrierPoints(vic))) <= 0;
+        hurt(vic, att, total, dies);
+        if (!dies) return false;
+        hpKill(vic, att);
+        return true;
+    }
+
+    /**
+     * 조준점(ax, ay)에 가장 가까운 상대를 고른다(화염구의 확정 타겟팅). 내 원 가장자리에서 그 원 가장자리까지가 사거리(bolt_reach_px, 화면 기준) 안이고
+     * 맞힐 수 있는(targetable) 원만 고른다. 없으면 null.
+     */
+    Member pickTarget(Member m, double ax, double ay) {
+        double reach = reachWorld(skillConfig.param("bolt_reach_px"), m.displayRadius);
+        if (!Double.isFinite(ax) || !Double.isFinite(ay)) { ax = m.x + m.vx; ay = m.y + m.vy; }
+        Member best = null; double bestD = Double.MAX_VALUE;
+        for (Member t : targetsInReach(m, reach)) {
+            double d = Math.hypot(t.x - ax, t.y - ay);
+            if (d < bestD) { best = t; bestD = d; }
+        }
+        return best;
+    }
+
+    /** 내 원 가장자리에서 그 원 가장자리까지가 reach 안이고 맞힐 수 있는 원 모두(연결이 끊긴 원은 고르지 않는다) */
+    List<Member> targetsInReach(Member m, double reach) {
+        List<Member> out = new ArrayList<>();
+        for (Member t : members.values()) {
+            if (!targetable(m, t) || t.offline) continue;
+            if (Math.hypot(t.x - m.x, t.y - m.y) - m.displayRadius - t.displayRadius > reach) continue;
+            out.add(t);
+        }
+        return out;
+    }
+
+    /** 남에게 닿는 스킬을 쓰면 은신이 풀린다 */
+    private void breakStealth(Member m) {
+        if (m.stealthUntil <= clockSeconds) return;
+        m.stealthUntil = 0;
+        broadcast(SkillFx.stealthEnd(m.entityNo));
+    }
+
+    /** 콤보 불꽃이 붙었는지(사람과 봇 모두, 4.25) */
+    boolean isFlame(Member m) { return combos.flame(m); }
+
+    /** 키워드를 잃은 원은 잠깐 무적이다(4.3). 모두의 화면에 그 원의 보호막과 카운트다운이 보이게 알린다. */
+    void invincible(Member m, Tuning tu) {
+        broadcast(RoomMessages.invincibility(m.entityNo, (long) (tu.loseProtectSeconds() * 1000)));
+    }
+
+    /**
+     * 튕김(4.3): 밀려나는 거리 = 최대 속도 × knockbackDistance(초) × 세기. 같은 크기끼리는 세기 1, 작은 쪽은 크기 비율만큼(상한 3배).
+     * 사람에게는 같은 튕김을 알려서 클라이언트 예측도 같이 밀려나게 한다(크게 밀려도 화면이 순간 이동하지 않게).
+     */
+    void knock(Member m, double nx, double ny, double strength, Tuning tu) {
+        double dist = tu.maxSpeed() * tu.knockbackDistance() * strength;
+        m.kbX = nx * dist; m.kbY = ny * dist; m.kbTime = tu.knockbackSeconds();
+        if (!m.bot) outbox.sendText(m, RoomMessages.knock(m.kbX, m.kbY, (long) (tu.knockbackSeconds() * 1000)));
+    }
+
+    /** 클라이언트가 보낸 왕복 시간(ms)으로 지연 보상 시간을 정한다. 이상한 값은 0~상한으로 자른다. */
+    public void setLag(Member m, double rttMs) {
+        m.lagSec = Double.isFinite(rttMs) ? Math.max(0, Math.min(LAG_COMP_MAX_SEC, rttMs / 2000)) : 0;
+    }
+
+    /** 클라이언트가 알린 보이는 범위(가로·세로 절반, px)를 받는다. 값은 한도 안으로 맞춘다(너무 작아 화면이 비거나 너무 커서 전부 보내게 되는 것을 막는다). */
+    public void setView(Member m, double halfW, double halfH) {
+        if (members.get(m.entityNo) != m) return;
+        m.viewHalfW = clamp(halfW, VIEW_MIN, VIEW_MAX);
+        m.viewHalfH = clamp(halfH, VIEW_MIN, VIEW_MAX);
+    }
+
+    static final double VIEW_MIN = 300, VIEW_MAX = 30000;
+    /** 보이는 범위에 더하는 여유: 범위의 비율과 고정 거리. 가장자리에서 원이 갑자기 나타나지 않게 한다(스냅샷은 초당 10번이라 그 사이 움직이는 거리도 포함) */
+    static final double VIEW_MARGIN_RATIO = 0.3, VIEW_MARGIN_PX = 400;
+    private static final double SNAP_CELL = 1000;
+
+    /**
+     * 스냅샷(관심 영역 전송): [u8 type=1][u32 tick][f32 half][u16 n] + n × [u32 entity][f32 x][f32 y][f32 r][f32 score][u16 level][u8 0=예약].
+     * 사람마다 그 사람 화면 둘레(보이는 범위 + 여유)에 걸친 원만 담는다. 내 원은 늘 들어간다(내 위치 보정에 쓴다).
+     * 방 전원이 범위 안이면(작은 방) 모두에게 같은 배열을 그대로 보낸다. 관전자와 죽어서 구경 중인 사람은 전체를 받는다.
+     * 내 원은 클라이언트가 welcome의 entityNo로 찾는다.
+     */
+    private void sendSnapshots(double half) {
+        int n = members.size();
+        final int REC = 23;
+        Member[] order = members.values().toArray(new Member[0]);
+        byte[] recs = new byte[n * REC];
+        ByteBuffer rb = ByteBuffer.wrap(recs);
+        double maxR = 0;
+        Map<Long, List<Integer>> cells = new HashMap<>();
+        for (int i = 0; i < n; i++) {
+            Member m = order[i];
+            rb.putInt(m.entityNo).putFloat((float) m.x).putFloat((float) m.y)
+                    .putFloat((float) m.displayRadius).putFloat((float) m.score).putShort((short) m.level).put((byte) 0);
+            maxR = Math.max(maxR, m.displayRadius);
+            cells.computeIfAbsent(cellKey(Math.floor(m.x / SNAP_CELL), Math.floor(m.y / SNAP_CELL)), k -> new ArrayList<>()).add(i);
+        }
+        byte[] all = withHeader(recs, n, half);
+        for (Member m : order) {
+            if (m.bot || m.offline) continue;
+            double ex = m.viewHalfW * (1 + VIEW_MARGIN_RATIO) + VIEW_MARGIN_PX, ey = m.viewHalfH * (1 + VIEW_MARGIN_RATIO) + VIEW_MARGIN_PX;
+            List<Integer> pick = new ArrayList<>();
+            int cx0 = (int) Math.floor((m.x - ex - maxR) / SNAP_CELL), cx1 = (int) Math.floor((m.x + ex + maxR) / SNAP_CELL);
+            int cy0 = (int) Math.floor((m.y - ey - maxR) / SNAP_CELL), cy1 = (int) Math.floor((m.y + ey + maxR) / SNAP_CELL);
+            for (int cx = cx0; cx <= cx1; cx++) for (int cy = cy0; cy <= cy1; cy++) {
+                List<Integer> l = cells.get(cellKey(cx, cy));
+                if (l == null) continue;
+                for (int idx : l) {
+                    Member o = order[idx];
+                    if (o == m || (Math.abs(o.x - m.x) <= ex + o.displayRadius && Math.abs(o.y - m.y) <= ey + o.displayRadius)) pick.add(idx);
+                }
+            }
+            if (pick.size() >= n) { outbox.send(m, ByteBuffer.wrap(all)); continue; } // 전원이 범위 안: 같은 배열을 나눠 쓴다
+            byte[] mine = new byte[pick.size() * REC];
+            int p = 0;
+            for (int idx : pick) { System.arraycopy(recs, idx * REC, mine, p, REC); p += REC; }
+            outbox.send(m, ByteBuffer.wrap(withHeader(mine, pick.size(), half)));
+        }
+        for (Member sp : spectators) outbox.send(sp, ByteBuffer.wrap(all)); // 관전자·죽어서 구경 중인 사람은 전체
+    }
+
+    private static long cellKey(double cx, double cy) { return ((long) cx << 32) ^ ((long) cy & 0xffffffffL); }
+
+    private byte[] withHeader(byte[] recs, int count, double half) {
+        ByteBuffer b = ByteBuffer.allocate(11 + recs.length);
+        b.put((byte) 1).putInt((int) tick).putFloat((float) half).putShort((short) count).put(recs);
+        return b.array();
+    }
+
+    /**
+     * 미니맵: 큰 아이콘 상위 20명(4.2). 관심 영역과 관계없이 모두에게 같은 내용을 보낸다(내 위치는 클라이언트가 그린다).
+     * [u8 type=2][u8 n] + n × [u32 entity][f32 x][f32 y][f32 r]
+     */
+    private void sendMinimap() {
+        if (members.isEmpty()) return;
+        List<Member> top = members.values().stream()
+                .filter(m -> m.stealthUntil <= clockSeconds) // 은신 중인 원은 미니맵에도 나오지 않는다(4.33)
+                .sorted(Comparator.comparingDouble((Member m) -> m.displayRadius).reversed())
+                .limit(MINIMAP_TOP).toList();
+        ByteBuffer buf = ByteBuffer.allocate(2 + top.size() * 16);
+        buf.put((byte) 2).put((byte) top.size());
+        for (Member m : top) buf.putInt(m.entityNo).putFloat((float) m.x).putFloat((float) m.y).putFloat((float) m.displayRadius);
+        byte[] bytes = buf.array();
+        for (Member m : members.values()) outbox.send(m, ByteBuffer.wrap(bytes));
+        for (Member sp : spectators) outbox.send(sp, ByteBuffer.wrap(bytes));
+    }
+
+    private Map<String, Object> rosterMessage() {
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (Member m : members.values()) {
+            // 칭호·테두리·효과는 없을 수 있어서(null) Map.of 대신 HashMap을 쓴다
+            Map<String, Object> e = new HashMap<>();
+            e.put("e", m.entityNo); e.put("nickname", m.nickname); e.put("level", m.level); e.put("bot", m.bot);
+            Skin k = m.skin;
+            e.put("title", m.title); e.put("bg", k.background()); e.put("borderColor", k.borderColor()); e.put("borderWidth", k.borderWidth());
+            e.put("trail", m.trail); e.put("art", k.art()); e.put("borderEffect", k.borderEffect());
+            e.put("nameColor", k.nameColor()); e.put("nameStyle", k.nameStyle());
+            e.put("combo", m.combo);
+            list.add(e);
+        }
+        return RoomMessages.roster(list, comboTuning.flameAt()); // 불꽃을 그릴 콤보 기준(4.25)
+    }
+
+    private void broadcastRoster() {
+        Map<String, Object> msg = rosterMessage();
+        for (Member m : members.values()) outbox.sendText(m, msg);
+        for (Member sp : spectators) outbox.sendText(sp, msg);
+    }
+
+    /**
+     * 응답 없는 접속 정리: 클라이언트는 2초마다 ping을 보낸다. SILENT_SECONDS 동안 아무 메시지도 없으면(네트워크가 끊겼는데 닫힘 신호가
+     * 오지 않은 경우, 중간 프록시가 서버 쪽 연결을 남겨 둔 경우) 방에서 빼고 연결을 닫는다. 그러지 않으면 랭킹·방에 유령 접속자가 남는다.
+     * 백그라운드 탭은 브라우저가 타이머를 1분 간격까지 늦추므로 그보다 넉넉하게 잡는다.
+     */
+    static final long SILENT_SECONDS = 90;
+
+    private void dropSilent() {
+        long now = nanoClock.getAsLong();
+        for (Member m : List.copyOf(members.values())) {
+            if (m.bot || m.offline || now - m.lastHeardNanos < SILENT_SECONDS * 1_000_000_000L) continue;
+            disconnect(m, m.session); // 응답 없는 접속도 끊긴 것으로 보고 원은 남은 시간만큼 둔다(4.32)
+            outbox.close(m);
+        }
+        for (Member sp : List.copyOf(spectators)) {
+            if (now - sp.lastHeardNanos < SILENT_SECONDS * 1_000_000_000L) continue;
+            removeSpectator(sp);
+            outbox.close(sp);
+        }
+    }
+
+    // ------------------------------------------------------------ NPC 봇(4.21)
+
+    private long botSeq;
+    /** EXP → 레벨. 서버가 레벨표(levels)로 바꿔 끼운다. 기본값은 시드와 같은 곡선(4.9). */
+    private java.util.function.LongToIntFunction levelForExp = Room::defaultLevelForExp;
+
+    public void setLevelForExp(java.util.function.LongToIntFunction f) { this.levelForExp = f; }
+
+    /** 모은 EXP 전체(누적)로 본 레벨: 레벨마다 필요한 EXP(시드 곡선)를 앞에서부터 차례로 쓴다. */
+    static int defaultLevelForExp(long exp) {
+        long[] low = {0, 0, 1, 3, 8, 13, 22, 33, 50, 72, 100};
+        int level = 1;
+        long left = exp;
+        for (int lv = 2; lv <= 100; lv++) {
+            long need = lv <= 10 ? low[lv] : Math.round(100 * Math.pow(lv / 10.0, 2));
+            if (left >= need) { left -= need; level = lv; } else break;
+        }
+        return level;
+    }
+
+    /** 사람 수. 방 정원(100명) 검사와 접속 인원에 쓴다. 봇은 세지 않는다. */
+    private int humanCount() {
+        int n = 0;
+        for (Member m : members.values()) if (!m.bot) n++;
+        return n;
+    }
+
+    /** 봇 유행도 상한: 그 방에 접속 중인 사람들의 현재 유행도 평균 × botCapRatio(기본 1, 즉 평균). 봇은 평균에 넣지 않는다. */
+    double botCap(Tuning tu) {
+        double sum = 0;
+        int n = 0;
+        for (Member m : members.values()) if (!m.bot) { sum += m.score; n++; }
+        return n == 0 ? 0 : Math.floor(sum / n * tu.botCapRatio());
+    }
+
+    /**
+     * 1초마다: 사람이 있으면 사람 + 봇이 botPlayers가 되도록 봇을 하나씩 넣거나 뺀다. 사람이 많아도 봇은 botMinPlayers 이상 둔다
+     * (사람이 없으면 봇도 없다).
+     * 사람들 평균이 내려가 상한을 넘은 봇은 키워드를 하나씩 내려놓고, EXP만으로도 넘으면 빼고 새 봇으로 바꾼다.
+     */
+    void maintainBots(Tuning tu) {
+        double cap = botCap(tu);
+        for (Member b : List.copyOf(members.values())) {
+            if (!b.bot || b.score <= cap) continue;
+            if (!b.botKeywords.isEmpty()) { b.botKeywords.removeFirst(); botRecompute(b, tu); }
+            else { members.remove(b.entityNo); broadcastRoster(); }
+        }
+        int humans = humanCount(), bots = members.size() - humans;
+        int want = humans == 0 ? 0 : Math.max(tu.botMinPlayers(), tu.botPlayers() - humans);
+        if (bots < want) addBot(tu);
+        else if (bots > want) members.values().stream().filter(m -> m.bot).findFirst().ifPresent(b -> {
+            members.remove(b.entityNo);
+            broadcastRoster();
+        });
+    }
+
+    /**
+     * 사람과 같은 기준으로 봇을 만든다: EXP를 정하고(레벨은 레벨표로), 그 EXP 안에서 키워드 몇 개를 가진 것으로 한다.
+     * 유행도 = min(EXP, 100) + 키워드 점수 합이고 상한(사람 평균)을 넘지 않는다.
+     */
+    private void addBot(Tuning tu) {
+        java.util.random.RandomGenerator rnd = random;
+        double cap = botCap(tu);
+        Member m = new Member(nextEntity++, -(++botSeq), null);
+        m.bot = true;
+        m.nickname = "Bot";
+        // EXP를 정하고, 많이 추가한 사람은 대개 가진 키워드도 많으므로 EXP에 비례해 가진 키워드 수를 정한다
+        // (최근 30번 추가 중 30~100%를 아직 가진 것으로 본다. 추가한 횟수(EXP)보다 많을 수는 없다).
+        // 합이 상한(사람 평균)을 넘으면 키워드만 빼지 않고 EXP 범위를 줄여 다시 뽑는다. 작은 원인데 레벨만 높은 봇이 되지 않게
+        BotRevive rv = botRespawns > 0 ? botRevives.pollFirst() : null; // 죽었다 다시 나오는 봇은 새로 뽑지 않고 EXP·남은 키워드를 이어받는다(사람의 리스폰과 같다)
+        if (rv != null) {
+            m.botExp = rv.exp();
+            for (BotKw k : rv.keywords()) if (catalog.containsKey(k.id())) m.botKeywords.add(k);
+            m.botStyle = rv.style(); m.botReact = rv.react();
+        } else {
+        double expMax = Math.min(300, cap);
+        for (int attempt = 0; attempt < 12; attempt++) {
+            m.botExp = expMax < 1 ? 0 : rnd.nextLong((long) expMax + 1);
+            if (botBase(m.botExp, tu) <= cap) break; // EXP만으로 상한을 넘으면 범위를 줄여 다시 뽑는다
+            expMax *= 0.7;
+            if (attempt == 11) m.botExp = 0; // 끝내 못 맞추면 가장 작은 봇
+        }
+        // 그 나라의 🔥 키워드 중에서 무작위로 가져오되, 합이 상한(사람 평균)을 넘지 않는 것만 담는다(없으면 키워드 없는 봇)
+        long want = Math.round(Math.min(m.botExp, 30) * (0.3 + rnd.nextDouble() * 0.7));
+        double room = cap - botBase(m.botExp, tu);
+        List<CatalogKw> pool = new ArrayList<>(catalog.values());
+        Collections.shuffle(pool, rnd);
+        for (CatalogKw k : pool) {
+            if (m.botKeywords.size() >= want) break;
+            if (k.value() > room) continue;
+            m.botKeywords.add(new BotKw(k.id()));
+            room -= k.value();
+        }
+        m.botStyle = rnd.nextInt(3);
+        m.botReact = 0.25 + rnd.nextDouble() * 0.45;
+        }
+        m.hp = hpTuning.max();
+        m.botHeading = rnd.nextDouble() * Math.PI * 2;
+        m.botNextPlusAt = clockSeconds + 15 + rnd.nextDouble() * 30;
+        botRecompute(m, tu);
+        m.displayRadius = m.radius;
+        double area = currentArea();
+        // 죽은 봇을 다시 채울 때는 사람처럼 가운데 세이프존에서 나온다(4.31)
+        boolean respawn = botRespawns > 0;
+        double[] spawn = respawn ? centerSpawn(area) : findSpawn(area);
+        if (respawn) botRespawns--;
+        m.x = spawn[0]; m.y = spawn[1];
+        members.put(m.entityNo, m);
+        broadcastRoster();
+    }
+
+    /** 봇의 유행도와 레벨을 사람과 같은 식으로 다시 정한다: min(EXP, 100) + Σ 키워드 점수, 레벨은 레벨표. */
+    private void botRecompute(Member b, Tuning tu) {
+        int lv = levelForExp.applyAsInt(b.botExp);
+        if (lv != b.level) { b.level = lv; broadcastRoster(); }
+        b.score = Math.min(b.botExp, tu.expScoreCap()) + lv + botValue(b); // 레벨 값이 유행도에 1:1로 더해진다(4.8)
+        b.radius = radiusFor(b.score);
+    }
+
+    /** 봇의 키워드 말고 유행도에 들어가는 몫: min(EXP, 상한) + 레벨(1:1, 4.8). 레벨은 EXP로 레벨표에서 정한다 */
+    private double botBase(long exp, Tuning tu) { return Math.min(exp, tu.expScoreCap()) + levelForExp.applyAsInt(exp); }
+
+    /** 방 메모리에서 봇이 가진 키워드의 현재 유행도 합. 목록에 없어진(비활성·금지·삭제된) 키워드는 세지 않는다. */
+    private long botValue(Member b) {
+        long sum = 0;
+        for (BotKw k : b.botKeywords) { CatalogKw c = catalog.get(k.id()); if (c != null) sum += c.value(); }
+        return sum;
+    }
+
+    private static boolean holds(Member b, long keywordId) {
+        for (BotKw k : b.botKeywords) if (k.id() == keywordId) return true;
+        return false;
+    }
+
+    /**
+     * 봇이 키워드 하나를 얻는다(4.21). 이긴 봇이 진 쪽(사람·봇)이 잃은 키워드를 가져가는 경우이고, 이미 가졌거나 지금 🔥 목록에 없으면 건너뛴다.
+     * 사람이 빼앗는 것과 달리 DB에는 아무것도 쓰지 않는다.
+     */
+    private void botGain(Member b, long keywordId) {
+        if (b.dead || members.get(b.entityNo) != b || !catalog.containsKey(keywordId) || holds(b, keywordId)) return;
+        b.botKeywords.add(new BotKw(keywordId));
+        botRecompute(b, tuning);
+        healFromKeyword(b, catalog.get(keywordId).value(), b.score); // 봇도 키워드를 얻으면 체력이 회복된다(4.36)
+    }
+
+    /** 봇의 "추가": 사람처럼 EXP +1과 🔥 키워드 하나(메모리). 상한(사람 평균)을 넘으면 하지 않는다. */
+    private void botPlus(Member b, Tuning tu) {
+        double headroom = botCap(tu) - (botBase(b.botExp + 1, tu) + botValue(b));
+        List<CatalogKw> fit = new ArrayList<>();
+        for (CatalogKw k : catalog.values()) if (k.value() <= headroom && !holds(b, k.id())) fit.add(k);
+        if (fit.isEmpty()) return;
+        b.botExp++;
+        CatalogKw gained = fit.get(random.nextInt(fit.size()));
+        b.botKeywords.add(new BotKw(gained.id()));
+        botRecompute(b, tu);
+        healFromKeyword(b, gained.value(), b.score);
+    }
+
+    /** 봇이 충돌로 지면 사람처럼 가진 키워드 하나를 잃는다. 호출하는 쪽이 비어 있지 않은지 보았다. 잃은 키워드를 돌려준다. */
+    private BotKw botLose(Member b, Tuning tu) {
+        BotKw lost = b.botKeywords.remove(random.nextInt(b.botKeywords.size()));
+        botRecompute(b, tu);
+        return lost;
+    }
+
+    /** 봇이 사람에게서 키워드를 빼앗았다(4.21): 이긴 봇이 그 키워드를 메모리에 가진다. 이미 가졌거나 🔥 목록에 없으면 건너뛴다. */
+    public void botTakes(Member bot, long keywordId) { botGain(bot, keywordId); }
+
+    /** 방이 쓰는 키워드 목록 한 줄(4.21): 번호, 이름, 지금 유행도 */
+    public record CatalogKw(long id, String text, long value) {}
+    /** 봇이 가진 키워드 하나(번호만 들고, 이름·점수는 목록에서 찾는다) */
+    public record BotKw(long id) {}
+
+    private Map<Long, CatalogKw> catalog = new HashMap<>();
+
+    /**
+     * 이 나라의 🔥 키워드 목록을 새로 받는다(서버가 주기적으로 읽어 온다, 4.21). 봇이 키워드를 고르고 점수를 계산하는 데 쓰며,
+     * 목록에서 사라진(비활성·금지·삭제) 키워드는 봇 목록에서도 뺀다.
+     */
+    public void setKeywordCatalog(Collection<CatalogKw> list) {
+        Map<Long, CatalogKw> next = new HashMap<>();
+        for (CatalogKw k : list) next.put(k.id(), k);
+        catalog = next;
+        for (Member b : members.values()) {
+            if (!b.bot) continue;
+            b.botKeywords.removeIf(k -> !next.containsKey(k.id()));
+            botRecompute(b, tuning);
+        }
+    }
+
+    /**
+     * 불꽃에 맞은 봇은 가진 키워드 점수를 모두 잃는다(4.25). 사람과 같이 3초 무적, 이긴 쪽 콤보 +1, 진 쪽 콤보·불꽃 없앰,
+     * 잃은 개수의 일부만큼 ! 구슬이 떨어진다. 이긴 쪽이 사람이면 알림을 보낸다(봇의 키워드는 이름이 없어 개수와 점수만 알린다).
+     */
+    private void botWipe(Member cold, Member hot, Tuning tu, int percent) {
+        long before = botValue(cold);
+        int count = botLoseFraction(cold, percent); // 사람과 같은 규칙: 내림, 최소 1개
+        long score = before - botValue(cold);
+        botRecompute(cold, tu);
+        cold.protectUntil = clockSeconds + tu.loseProtectSeconds();
+        invincible(cold, tu);
+        dropPrizeOrbs(cold, count); // 봇의 키워드는 모두 🔥로 본다
+        if (!hot.bot) {
+            outbox.sendText(hot, LossMessages.hit(KeywordLoss.Cause.FLAME, cold.nickname, count, score));
+            outbox.requestSteal(this, hot); // 잃게 해도 공격 성공 한 번 = 빼앗은 횟수 +1(4.3)
+        }
+    }
+
+    /** 체력이 0이 된 봇: 가진 키워드의 death_lose_percent%(내림, 최소 1개)를 잃고 그 수의 일부만큼 ! 구슬이 떨어진다. 죽인 쪽이 사람이면 사람이 잃은 때와 같은 알림을 받는다 */
+    private void botHalveOnDeath(Member bot, Member killer) {
+        if (bot.botKeywords.isEmpty()) return;
+        long before = botValue(bot);
+        int count = botLoseFraction(bot, hpTuning.deathLosePercent());
+        botRecompute(bot, tuning);
+        long score = before - botValue(bot);
+        dropPrizeOrbs(bot, count);
+        if (!killer.bot) outbox.sendText(killer, LossMessages.hit(KeywordLoss.Cause.DEATH, bot.nickname, count, score));
+    }
+
+    /** 봇이 가진 키워드 중 percent%(내림, 최소 1개, 100 이상이면 모두)를 무작위로 잃는다. 잃은 개수를 돌려준다(점수는 부르는 쪽이 다시 계산한다) */
+    private int botLoseFraction(Member bot, int percent) {
+        int total = bot.botKeywords.size();
+        int count = percent >= 100 ? total : Math.min(total, Math.max(1, total * percent / 100));
+        Collections.shuffle(bot.botKeywords, random);
+        for (int i = 0; i < count; i++) bot.botKeywords.remove(bot.botKeywords.size() - 1);
+        return count;
+    }
+
+    /** 봇이 ? 구슬을 먹으면 사람과 같은 확률로 "추가"하고, 나머지는 가진 키워드 점수 하나를 잃는다(없으면 꽝). */
+    private void botOrb(Member b) {
+        Tuning tu = tuning;
+        if (random.nextDouble(100) < tu.orbActivePercent()) botPlus(b, tu);
+        else if (!b.botKeywords.isEmpty()) botLose(b, tu);
+    }
+
+    /** 봇도 가끔 스스로 키워드를 추가하고, 오래된 키워드는 사라진다(사람의 24시간 삭제처럼 줄었다 늘었다 한다). */
+    private void botLife(Member b, Tuning tu) {
+        java.util.random.RandomGenerator rnd = random;
+        b.botNextPlusAt = clockSeconds + 15 + rnd.nextDouble() * 30;
+        if (!b.botKeywords.isEmpty() && rnd.nextDouble() < 0.35) { b.botKeywords.removeFirst(); botRecompute(b, tu); }
+        else botPlus(b, tu);
+    }
+
+    /**
+     * 봇이 사람처럼 움직이게 한다. 봇마다 반응 속도(0.25~0.7초)가 달라 그 간격으로 다시 판단한다.
+     * 1) 나를 이길 원(불꽃·체력까지 본 승산, botMatchup)이 가까우면 반대쪽으로 도망치되, 벽에 몰리지 않게 안쪽으로 꺾고 지그재그로 흔든다.
+     * 2) 내가 이길 원(botMatchup)이 보이면 그 원이 갈 곳을 앞질러 쫓는다. 4~7초 안에 못 잡으면 포기하고 한동안 쫓지 않는다.
+     * 3) 아니면 다른 봇이 노리지 않는 가까운 구슬로 간다.
+     * 4) 할 일이 없으면 진행 방향을 조금씩 틀며 곡선으로 돌아다니고, 가끔 잠깐 멈춘다.
+     * 15~45초마다 스스로 키워드를 추가하거나 오래된 키워드가 사라진다(botLife).
+     */
+    private void thinkBots(Tuning tu, double half) {
+        java.util.random.RandomGenerator rnd = random;
+        Set<Integer> claimed = new HashSet<>();
+        for (Member m : members.values()) if (m.bot && m.botOrb != null && (orbs.containsKey(m.botOrb) || prizeOrbs.containsKey(m.botOrb))) claimed.add(m.botOrb);
+        BotGrid grid = null; // 이번 틱에 생각할 봇이 있을 때만, 한 번 만든다
+        for (Member b : members.values()) {
+            if (!b.bot) continue;
+            if (clockSeconds >= b.botNextPlusAt) botLife(b, tu);
+            if (clockSeconds < b.botThinkAt) continue;
+            b.botThinkAt = clockSeconds + b.botReact * (0.7 + rnd.nextDouble() * 0.6);
+            boolean dark = status.has(b, StatusEffects.Kind.DARK); // 암흑이면 자기 원 둘레만 보인다(사람과 같다)
+            double sight = b.displayRadius * StatusEffects.DARK_SIGHT_RATIO;
+            double fleeRange = b.botStyle == 0 ? 900 : 450, chaseRange = b.botStyle == 1 ? 1000 : 450, orbRange = b.botStyle == 2 ? 1600 : 700;
+            Member threat = null, prey = null;
+            double threatD = Double.MAX_VALUE, preyD = Double.MAX_VALUE;
+            if (grid == null) grid = new BotGrid(members.values(), orbs, prizeOrbs); // ? 구슬과 ! 구슬을 같이 본다(번호는 함께 쓴다)
+            // 방 전체가 아니라 이 봇 주변 칸에 있는 원만 본다(공간 격자). 볼 수 있는 가장 먼 거리 = 도망·쫓기 범위 + 내 반지름 + 가장 큰 원의 반지름
+            double look = Math.max(fleeRange, chaseRange) + b.displayRadius + grid.maxRadius;
+            for (Member o : grid.membersNear(b.x, b.y, look)) {
+                if (o == b) continue;
+                if (dark && Math.hypot(o.x - b.x, o.y - b.y) > sight) continue; // 암흑: 시야 밖의 원은 보이지 않는다
+                if (o.stealthUntil > clockSeconds) continue; // 은신 중인 원은 봇에게도 안 보인다: 쫓지도 피하지도 않는다(사람과 같다, 4.33)
+                double d = Math.hypot(o.x - b.x, o.y - b.y) - o.displayRadius - b.displayRadius;
+                // 세이프존 안의 원은 잡을 수 없고, 내가 세이프존 안이면 도망칠 필요가 없다(4.22)
+                if (d >= Math.max(fleeRange, chaseRange)) continue;
+                int mu = botMatchup(b, o); // 불꽃·체력까지 본 승산(4.36)
+                if (!b.safe && !o.safe && mu < 0 && d < fleeRange && d < threatD) { threat = o; threatD = d; }
+                if (!o.safe && mu > 0 && d < chaseRange && d < preyD) { prey = o; preyD = d; }
+            }
+            double limit = half - 60 - b.displayRadius;
+
+            if (threat != null) {
+                // 도망: 위협 반대 방향 + 벽에서 안쪽으로 미는 힘, 그리고 좌우로 흔들기
+                double dx = b.x - threat.x, dy = b.y - threat.y, len = Math.max(1, Math.hypot(dx, dy));
+                double ax = dx / len, ay = dy / len;
+                double wall = 500;
+                if (b.x > limit - wall) ax -= (b.x - (limit - wall)) / wall;
+                if (b.x < -limit + wall) ax += (-limit + wall - b.x) / wall;
+                if (b.y > limit - wall) ay -= (b.y - (limit - wall)) / wall;
+                if (b.y < -limit + wall) ay += (-limit + wall - b.y) / wall;
+                double ang = Math.atan2(ay, ax) + (rnd.nextDouble() - 0.5) * 0.9;
+                b.botHeading = ang; b.botIdleUntil = 0; b.botChaseFrom = 0;
+                setTarget(b, clamp(b.x + Math.cos(ang) * 550, -limit, limit), clamp(b.y + Math.sin(ang) * 550, -limit, limit));
+                continue;
+            }
+            if (clockSeconds < b.botIdleUntil) continue; // 잠깐 쉬는 중
+
+            if (prey != null && clockSeconds >= b.botChaseCooldown) {
+                if (b.botChaseFrom == 0) b.botChaseFrom = clockSeconds;
+                if (clockSeconds - b.botChaseFrom > 4 + (b.entityNo % 4)) {
+                    // 오래 쫓아도 못 잡으면 포기한다(끝없이 따라오지 않게)
+                    b.botChaseFrom = 0;
+                    b.botChaseCooldown = clockSeconds + 5 + rnd.nextDouble() * 5;
+                } else {
+                    double lead = 0.4 + rnd.nextDouble() * 0.4; // 상대가 갈 곳을 조금 앞질러 노린다
+                    setTarget(b, clamp(prey.x + prey.vx * lead, -limit, limit), clamp(prey.y + prey.vy * lead, -limit, limit));
+                    continue;
+                }
+            } else if (prey == null) {
+                b.botChaseFrom = 0;
+            }
+
+            double[] orb = nearestFreeOrb(b, dark ? Math.min(orbRange, sight) : orbRange, claimed, grid);
+            if (orb != null) {
+                b.botOrb = (int) orb[2];
+                claimed.add(b.botOrb);
+                setTarget(b, orb[0], orb[1]);
+                continue;
+            }
+            b.botOrb = null;
+
+            // 돌아다니기: 진행 방향을 조금씩 틀어 곡선으로, 벽 가까이면 안쪽으로 꺾는다. 가끔 잠깐 멈춘다
+            if (rnd.nextDouble() < 0.06) {
+                b.botIdleUntil = clockSeconds + 0.6 + rnd.nextDouble() * 1.6;
+                b.targetX = null; b.targetY = null;
+                setInput(b, 0, 0);
+                continue;
+            }
+            b.botHeading += (rnd.nextDouble() - 0.5) * 0.9;
+            double nx = b.x + Math.cos(b.botHeading) * 400, ny = b.y + Math.sin(b.botHeading) * 400;
+            if (Math.abs(nx) > limit || Math.abs(ny) > limit) {
+                b.botHeading = Math.atan2(-b.y, -b.x) + (rnd.nextDouble() - 0.5) * 1.2; // 가운데 쪽으로 돌아선다
+                nx = b.x + Math.cos(b.botHeading) * 400; ny = b.y + Math.sin(b.botHeading) * 400;
+            }
+            setTarget(b, clamp(nx, -limit, limit), clamp(ny, -limit, limit));
+        }
+    }
+
+    /**
+     * 봇이 보는 승산: 1이면 o가 사냥감(쫓는다), -1이면 위협(피한다), 0이면 비슷하다(신경 쓰지 않는다).
+     * 체력(HP)이 켜져 있으면 서로 상대를 쓰러뜨리는 데 몇 번 쳐야 하는지로 비교한다: 한 번의 피해는 hpDamage(불꽃 배수 포함)이고
+     * 체력이 적을수록 더 적게 맞아도 죽으니 점수가 조금 높은 상대도 피하게 된다. 같으면(또는 체력이 꺼져 있으면) 불꽃이 불꽃 없는 쪽을 이기는
+     * 키워드 규칙(4.25), 그다음 유행도로 정한다.
+     */
+    int botMatchup(Member b, Member o) {
+        boolean bf = isFlame(b), of = isFlame(o);
+        if (hpTuning.enabled() && !b.dead && !o.dead) {
+            double toMe = hpDamage(o, b), toThem = hpDamage(b, o);
+            if (!hpTuning.flameCounter() && bf != of) { if (bf) toMe = 0; else toThem = 0; }
+            double hitsToDie = toMe <= 0 ? Double.MAX_VALUE : Math.ceil(b.hp / toMe);
+            double hitsToKill = toThem <= 0 ? Double.MAX_VALUE : Math.ceil(o.hp / toThem);
+            if (hitsToKill < hitsToDie) return 1;
+            if (hitsToDie < hitsToKill) return -1;
+        }
+        if (bf != of) return bf ? 1 : -1;
+        return Double.compare(b.score, o.score);
+    }
+
+    /** 다른 봇이 노리지 않는 가장 가까운 구슬 {x, y, 번호}. */
+    private double[] nearestFreeOrb(Member b, double range, Set<Integer> claimed, BotGrid grid) {
+        double[] best = null;
+        double bestD = range;
+        for (Map.Entry<Integer, double[]> o : grid.orbsNear(b.x, b.y, range)) {
+            if (claimed.contains(o.getKey()) && !o.getKey().equals(b.botOrb)) continue;
+            double[] p = o.getValue();
+            double d = Math.hypot(p[0] - b.x, p[1] - b.y);
+            if (d < bestD) { bestD = d; best = new double[]{p[0], p[1], o.getKey()}; }
+        }
+        return best;
+    }
+
+    /**
+     * 봇이 주변만 보게 하는 공간 격자(4.21). 맵을 한 변 CELL(500px)인 정사각형 칸으로 나누고, 원과 구슬을 중심이 속한 칸에 넣어 둔다.
+     * 봇은 방 전체를 훑는 대신 자기 주변 칸의 것만 꺼내 본다(봇 수 × 인원 → 봇 수 × 주변 수). 이번 틱에 한 번 만든다.
+     */
+    private static final class BotGrid {
+        static final double CELL = 500;
+        final Map<Long, List<Member>> members = new HashMap<>();
+        final Map<Long, List<Map.Entry<Integer, double[]>>> orbs = new HashMap<>();
+        double maxRadius;
+
+        BotGrid(Collection<Member> ms, Map<Integer, double[]> orbMap, Map<Integer, double[]> prizeMap) {
+            for (Member m : ms) {
+                members.computeIfAbsent(key(m.x, m.y), k -> new ArrayList<>()).add(m);
+                maxRadius = Math.max(maxRadius, m.displayRadius);
+            }
+            for (Map.Entry<Integer, double[]> o : orbMap.entrySet()) {
+                orbs.computeIfAbsent(key(o.getValue()[0], o.getValue()[1]), k -> new ArrayList<>()).add(o);
+            }
+            for (Map.Entry<Integer, double[]> o : prizeMap.entrySet()) {
+                orbs.computeIfAbsent(key(o.getValue()[0], o.getValue()[1]), k -> new ArrayList<>()).add(o);
+            }
+        }
+
+        private static int cell(double v) { return (int) Math.floor(v / CELL); }
+        private static long key(int cx, int cy) { return ((long) cx << 32) ^ (cy & 0xffffffffL); }
+        private static long key(double x, double y) { return key(cell(x), cell(y)); }
+
+        /** 중심이 (x, y)에서 reach 안쪽 사각형에 걸친 칸의 원들(거리 판단은 부르는 쪽이 다시 한다) */
+        List<Member> membersNear(double x, double y, double reach) {
+            List<Member> out = new ArrayList<>();
+            for (int cx = cell(x - reach); cx <= cell(x + reach); cx++)
+                for (int cy = cell(y - reach); cy <= cell(y + reach); cy++) {
+                    List<Member> l = members.get(key(cx, cy));
+                    if (l != null) out.addAll(l);
+                }
+            return out;
+        }
+
+        List<Map.Entry<Integer, double[]>> orbsNear(double x, double y, double reach) {
+            List<Map.Entry<Integer, double[]>> out = new ArrayList<>();
+            for (int cx = cell(x - reach); cx <= cell(x + reach); cx++)
+                for (int cy = cell(y - reach); cy <= cell(y + reach); cy++) {
+                    List<Map.Entry<Integer, double[]>> l = orbs.get(key(cx, cy));
+                    if (l != null) out.addAll(l);
+                }
+            return out;
+        }
+    }
+
+    /** 인원이 적으면 활동 영역을 좁힌다(4.2). 100명(방 정원)에서 기준 맵 한 변, 아무리 적어도 그 1/4보다 좁히지 않는다. */
+    double activeArea(int n) {
+        double full = tuning.worldSize();
+        return clamp(full * Math.sqrt(Math.max(n, 1) / 100.0), full / 4, full);
+    }
+
+    public double radiusFor(double score) {
+        Tuning t = tuning;
+        return t.minRadius() + (t.maxRadius() - t.minRadius()) * Math.min(score, t.scoreCap()) / t.scoreCap();
+    }
+
+    /** 밀도가 낮은 곳: 무작위 후보 12개 중 가장 가까운 아이콘과의 거리가 가장 먼 곳. */
+    private double[] findSpawn(double area) {
+        double half = area / 2 - 100;
+        double[] best = {0, 0};
+        double bestD = -1;
+        for (int i = 0; i < 12; i++) {
+            double x = (random.nextDouble() * 2 - 1) * half;
+            double y = (random.nextDouble() * 2 - 1) * half;
+            double nearest = Double.MAX_VALUE;
+            for (Member m : members.values()) nearest = Math.min(nearest, Math.hypot(m.x - x, m.y - y) - m.displayRadius);
+            if (nearest > bestD) { bestD = nearest; best = new double[]{x, y}; }
+        }
+        return best;
+    }
+
+    static double clamp(double v, double lo, double hi) { return lo > hi ? (lo + hi) / 2 : Math.max(lo, Math.min(hi, v)); }
+
+}

@@ -1,0 +1,232 @@
+package com.trendist.title.service;
+
+import com.trendist.common.exception.ApiException;
+import com.trendist.country.entity.Country;
+import com.trendist.country.repository.CountryRepository;
+import com.trendist.game.event.GameEvents;
+import com.trendist.game.room.Room;
+import com.trendist.game.service.RoomManager;
+import com.trendist.player.entity.Player;
+import com.trendist.player.repository.PlayerRepository;
+import com.trendist.player.service.PlayerService;
+import com.trendist.setting.service.SettingService;
+import com.trendist.setting.support.SettingKeys;
+import com.trendist.common.support.Lang;
+import com.trendist.title.dto.TitleDtos;
+import com.trendist.title.entity.PlayerTitle;
+import com.trendist.title.entity.Title;
+import com.trendist.title.repository.PlayerTitleRepository;
+import com.trendist.title.repository.TitleRepository;
+import java.time.Instant;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.event.TransactionalEventListener;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Service
+@RequiredArgsConstructor
+public class TitleServiceImpl implements TitleService {
+    private static final Logger log = LoggerFactory.getLogger(TitleServiceImpl.class);
+    private static final Pattern METRIC = Pattern.compile("\"metric\"\\s*:\\s*\"([a-z_]+)\"");
+    private static final Pattern GTE = Pattern.compile("\"gte\"\\s*:\\s*(\\d+)");
+    private static final Pattern WITHIN = Pattern.compile("\"within\"\\s*:\\s*(\\d+)");
+
+    private final TitleRepository titles;
+    private final PlayerTitleRepository playerTitles;
+    private final PlayerRepository players;
+    private final PlayerService playerService;
+    private final CountryRepository countries;
+    private final RoomManager rooms;
+    private final ApplicationEventPublisher events;
+    private final TransactionTemplate tx;
+    private final SettingService settings;
+
+    @org.springframework.beans.factory.annotation.Value("${trendist.titles.sync-check:false}")
+    private boolean syncCheck;
+    private final java.util.Set<Long> pendingChecks = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.ExecutorService checker = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "title-check");
+        t.setDaemon(true);
+        return t;
+    });
+    /** 칭호 검사는 늘 새 트랜잭션에서 한다(커밋이 끝난 뒤의 이벤트 처리 중이어도 같은 트랜잭션에 끼지 않게) */
+    private TransactionTemplate newTx;
+
+    @jakarta.annotation.PostConstruct
+    void initNewTx() {
+        newTx = new TransactionTemplate(tx.getTransactionManager());
+        newTx.setPropagationBehavior(TransactionTemplate.PROPAGATION_REQUIRES_NEW);
+    }
+
+    /** 조건을 풀어 둔 칭호. target은 METRIC이면 기준값(gte), RANK면 순위(within). */
+    private record Cond(Title title, String type, String metric, long target) {}
+
+    private List<Cond> conditions() {
+        List<Cond> out = new ArrayList<>();
+        for (Title t : titles.findByEnabledTrueOrderBySortOrderAsc()) {
+            // 테스트용 H2는 JSON 컬럼에 넣은 글을 따옴표를 이스케이프한 JSON 문자열로 돌려준다. 역슬래시를 빼고 읽는다
+            String p = t.getConditionParams().replace("\\", "");
+            Matcher m = METRIC.matcher(p);
+            if (!m.find()) continue;
+            Matcher v = ("RANK".equals(t.getConditionType()) ? WITHIN : GTE).matcher(p);
+            if (!v.find()) continue;
+            out.add(new Cond(t, t.getConditionType(), m.group(1), Long.parseLong(v.group(1))));
+        }
+        return out;
+    }
+
+    /** players의 수치(4.10). 새 지표는 players에 컬럼을 추가하고 여기에 이름을 늘린다. */
+    private static long metric(Player p, String name) {
+        return switch (name) {
+            case "add_count" -> p.getAddCount();
+            case "level" -> p.getLevel();
+            case "hold_count" -> p.getHoldCount();
+            case "current_score" -> p.getCurrentScore();
+            case "comment_score" -> p.getCommentScore();
+            case "search_count" -> p.getSearchCount();
+            case "steal_count" -> p.getStealCount();
+            case "bot_win_count" -> p.getBotWinCount();
+            case "orb_count" -> p.getOrbCount();
+            case "lose_count" -> p.getLoseCount();
+            case "kill_count" -> p.getKillCount();
+            case "death_count" -> p.getDeathCount();
+            case "tie_count" -> p.getTieCount();
+            case "boss_kill_count" -> p.getBossKillCount();
+            case "max_combo" -> p.getMaxCombo();
+            case "flame_out_count" -> p.getFlameOutCount();
+            case "active_days" -> p.getActiveDays();
+            default -> 0;
+        };
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public TitleDtos.Box box(long userId, Lang lang) {
+        Player p = playerService.requireCurrent(userId);
+        Map<Long, Instant> owned = new HashMap<>();
+        for (PlayerTitle pt : playerTitles.findByPlayerId(p.getId())) owned.put(pt.getTitleId(), pt.getCreatedAt());
+        List<TitleDtos.Item> items = new ArrayList<>();
+        for (Cond c : conditions()) {
+            long id = c.title().getId();
+            long current = "METRIC".equals(c.type()) ? metric(p, c.metric()) : 0;
+            items.add(new TitleDtos.Item(id, c.title().name(lang), c.title().description(lang), c.type(), c.metric(),
+                    current, c.target(), owned.containsKey(id), owned.get(id), Objects.equals(p.getTitleId(), id)));
+        }
+        return new TitleDtos.Box(p.getTitleId(), items);
+    }
+
+    @Override
+    @Transactional
+    public TitleDtos.Box activate(long userId, Long titleId, Lang lang) {
+        Player p = playerService.requireCurrent(userId);
+        String name = null;
+        if (titleId != null) {
+            if (!playerTitles.existsByPlayerIdAndTitleId(p.getId(), titleId)) throw ApiException.badRequest("TITLE_NOT_OWNED", "아직 받지 않은 칭호예요");
+            // 방에 보내는 이름표는 그 나라 언어(방 안 모두에게 같은 글)
+            name = activeTitleName(titleId, Lang.ofLocale(p.getCountry().getDefaultLocale()));
+        }
+        p.changeTitle(titleId);
+        events.publishEvent(new GameEvents.TitleChanged(p.getCountry().getId(), p.getId(), name));
+        return box(userId, lang);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public String activeTitleName(Long titleId, Lang lang) {
+        if (titleId == null) return null;
+        return titles.findById(titleId).filter(Title::isEnabled).map(t -> t.name(lang)).orElse(null);
+    }
+
+    /**
+     * 수치가 바뀐 트랜잭션이 끝난 뒤에 검사한다(커밋된 값으로). 칭호 검사가 실패해도 원래 요청에는 영향이 없다.
+     * 검사는 싸움·키워드 작업이 쥔 DB 연결과 겹치지 않게 별도 스레드 하나가 차례로 한다(같은 스레드에서 두 번째 연결을 요구하면
+     * 연결을 쥔 작업이 풀 크기만큼 몰릴 때 서버가 멈춘다). 같은 플레이어의 검사가 줄에 이미 있으면 다시 넣지 않는다(몰려도 한 번만).
+     * 자동 테스트는 결과를 바로 보려고 `trendist.titles.sync-check=true`로 같은 스레드에서 바로 한다.
+     */
+    @TransactionalEventListener(fallbackExecution = true)
+    public void on(GameEvents.TitleCheck e) {
+        if (syncCheck) { runCheck(e.playerId()); return; }
+        if (!pendingChecks.add(e.playerId())) return;
+        checker.execute(() -> {
+            pendingChecks.remove(e.playerId()); // 지금부터 바뀌는 수치는 다음 검사에서 본다
+            runCheck(e.playerId());
+        });
+    }
+
+    private void runCheck(long playerId) {
+        try { newTx.executeWithoutResult(st -> doCheck(playerId)); } catch (RuntimeException ex) { log.warn("title check {} failed", playerId, ex); }
+    }
+
+    @jakarta.annotation.PreDestroy
+    void stopChecker() { checker.shutdownNow(); }
+
+    @Override
+    @Transactional
+    public void checkMetrics(long playerId) { doCheck(playerId); }
+
+    private void doCheck(long playerId) {
+        Player p = players.findById(playerId).orElse(null);
+        if (p == null) return;
+        List<Cond> reached = conditions().stream()
+                .filter(c -> "METRIC".equals(c.type()) && metric(p, c.metric()) >= c.target()).toList();
+        grantAll(p, reached);
+    }
+
+    /**
+     * RANK 칭호(4.10): 그 나라 리더보드(접속 중인 사람끼리의 순위, 4.14)를 10초마다 보고 N위 안의 사람에게 준다.
+     * 리더보드는 방 메모리 값이라 DB를 보지 않는다. 혼자 있어도 1위가 되는 일을 막으려고, 접속 중인 사람이
+     * `rank_title_min_players`(기본 10명) 이상일 때만 준다.
+     */
+    @Scheduled(fixedDelay = 10_000, initialDelay = 15_000)
+    public void checkRanks() {
+        List<Cond> rank = conditions().stream().filter(c -> "RANK".equals(c.type()) && "current_score".equals(c.metric())).toList();
+        if (rank.isEmpty()) return;
+        long widest = rank.stream().mapToLong(Cond::target).max().orElse(0);
+        for (Country c : countries.findAll()) {
+            if (!c.isEnabled()) continue;
+            Collection<Room.Live> live = rooms.livePlayers(c.getId());
+            if (live.size() < settings.getInt(SettingKeys.RANK_TITLE_MIN_PLAYERS)) continue;
+            List<Room.Live> top = live.stream()
+                    .sorted(Comparator.comparingDouble(Room.Live::score).reversed().thenComparingLong(Room.Live::playerId))
+                    .limit(widest).toList();
+            for (int i = 0; i < top.size(); i++) {
+                int place = i + 1;
+                long playerId = top.get(i).playerId();
+                List<Cond> reached = rank.stream().filter(r -> place <= r.target()).toList();
+                try {
+                    tx.executeWithoutResult(s -> players.findById(playerId).ifPresent(p -> grantAll(p, reached)));
+                } catch (RuntimeException ex) {
+                    log.warn("rank title {} failed", playerId, ex);
+                }
+            }
+        }
+    }
+
+    private void grantAll(Player p, List<Cond> reached) {
+        if (reached.isEmpty()) return;
+        Set<Long> owned = new HashSet<>();
+        for (PlayerTitle pt : playerTitles.findByPlayerId(p.getId())) owned.add(pt.getTitleId());
+        for (Cond c : reached) {
+            long id = c.title().getId();
+            if (owned.contains(id)) continue;
+            try {
+                playerTitles.saveAndFlush(new PlayerTitle(p.getId(), id));
+            } catch (DataIntegrityViolationException dup) {
+                continue; // 동시에 두 번 검사했다. 이미 받았다
+            }
+            // 새로 얻어도 자동으로 활성화하지 않는다(4.10). 알림만 보낸다
+            events.publishEvent(new GameEvents.TitleGranted(p.getCountry().getId(), p.getId(), id,
+                    c.title().name(Lang.ofLocale(p.getCountry().getDefaultLocale())), c.title().description(Lang.ofLocale(p.getCountry().getDefaultLocale()))));
+        }
+    }
+}

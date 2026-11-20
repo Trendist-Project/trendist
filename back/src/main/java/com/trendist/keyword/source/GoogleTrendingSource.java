@@ -1,0 +1,130 @@
+package com.trendist.keyword.source;
+
+import com.trendist.keyword.ai.TrendNewsContext;
+import com.trendist.keyword.entity.DataSource;
+import com.trendist.keyword.support.KeywordNormalizer;
+import java.io.ByteArrayInputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.OptionalDouble;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Set;
+import java.util.stream.Collectors;
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+
+/**
+ * 구글 트렌드 실시간 인기 RSS(10.1). 목록의 제목(title)을 그대로 키워드 후보로 쓴다.
+ * 5분마다 다시 읽고(구글은 약 10분 단위로 바뀐다), 마지막으로 읽은 목록에 있는 단어는 외부 확인으로 본다.
+ */
+@Component
+@ConditionalOnProperty(prefix = "trendist.google-trends", name = "enabled", havingValue = "true")
+public class GoogleTrendingSource implements ExternalTrendSource {
+    private static final String RSS_URL = "https://trends.google.com/trending/rss?geo=";
+    private static final Duration FRESH_FOR = Duration.ofMinutes(30); // 이보다 오래 못 읽었으면 목록을 모르는 것으로 본다
+
+    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10))
+            .followRedirects(HttpClient.Redirect.NORMAL).build();
+    private final Clock clock;
+    private final TrendNewsContext news;
+    /** 구글 트렌드 geo 코드. 여기에 있는 나라만 이 소스가 쓰인다: GLOBAL(영어)은 미국 목록을 쓴다 */
+    private static final Map<String, String> GEO = Map.of("KR", "KR", "GLOBAL", "US");
+    // 나라별로 따로 기억한다(나라마다 목록·읽은 시각이 다르다)
+    private final Map<String, Set<String>> current = new ConcurrentHashMap<>();
+    private final Map<String, Instant> fetchedAt = new ConcurrentHashMap<>();
+
+    public GoogleTrendingSource(Clock clock, TrendNewsContext news) { this.clock = clock; this.news = news; }
+
+    @Override public boolean supports(String countryCode) { return GEO.containsKey(countryCode); }
+    @Override public String sourceName() { return DataSource.GOOGLE; }
+
+    /** 마지막 목록에 있으면 100, 없으면 값 없음. 목록이 오래됐으면 값 없음. */
+    @Override
+    public OptionalDouble heat(String countryCode, String normalized) {
+        Set<String> now = currentTitles(countryCode);
+        return now != null && now.contains(normalized) ? OptionalDouble.of(100) : OptionalDouble.empty();
+    }
+
+    /** 마지막으로 목록을 읽은 시각(관리자 대시보드, 13.11). 아직 못 읽었으면 null. */
+    public Instant fetchedAt(String countryCode) { return fetchedAt.get(countryCode); }
+
+    /** 마지막으로 읽은 목록의 정규화 키(오래됐어도 그대로). 아직 한 번도 못 읽었으면 빈 집합. 유지 기간 정리가 쓴다. */
+    public Set<String> lastTitles(String countryCode) { return current.getOrDefault(countryCode, Set.of()); }
+
+    /** 최근(30분 안)에 읽은 목록의 정규화 키. 모르면 null. 외부 확인(heat)이 쓴다. */
+    public Set<String> currentTitles(String countryCode) {
+        Instant at = fetchedAt.get(countryCode);
+        return at != null && at.plus(FRESH_FOR).isAfter(Instant.now(clock)) ? current.get(countryCode) : null;
+    }
+
+    /** RSS를 읽어 제목 목록(표기 그대로)을 돌려주고 그 나라의 현재 목록을 바꾼다. 지원하지 않는 나라이거나 실패하면 예외. */
+    public List<String> refresh(String countryCode) throws Exception {
+        String geo = GEO.get(countryCode);
+        if (geo == null) throw new IllegalArgumentException("google trends: unsupported country " + countryCode);
+        HttpRequest req = HttpRequest.newBuilder(URI.create(RSS_URL + geo)).timeout(Duration.ofSeconds(15))
+                .header("User-Agent", "Mozilla/5.0 (compatible; Trendist/1.0)").GET().build();
+        HttpResponse<byte[]> res = http.send(req, HttpResponse.BodyHandlers.ofByteArray());
+        if (res.statusCode() != 200) throw new IllegalStateException("google trends rss HTTP " + res.statusCode());
+        List<String> titles = parseTitles(res.body());
+        // 뉴스는 그 나라의 설명 언어(KR=ko, 그 밖=en)로 기억한다: 같은 철자가 두 나라에 있어도 섞이지 않게
+        String lang = "KR".equals(countryCode) ? "ko" : "en";
+        parseNews(res.body()).forEach((k, h) -> news.put(lang, k, h)); // 왜 유행인지 AI가 알 수 있게 관련 뉴스 제목을 기억한다
+        current.put(countryCode, titles.stream().map(KeywordNormalizer::normalize).collect(Collectors.toUnmodifiableSet()));
+        fetchedAt.put(countryCode, Instant.now(clock));
+        return titles;
+    }
+
+    /** item/title만 꺼낸다. 외부 엔티티·DTD는 막는다(XXE 방지). */
+    static List<String> parseTitles(byte[] xml) throws Exception {
+        DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
+        f.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        f.setExpandEntityReferences(false);
+        NodeList items = f.newDocumentBuilder().parse(new ByteArrayInputStream(xml)).getElementsByTagName("item");
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < items.getLength(); i++) {
+            NodeList t = ((Element) items.item(i)).getElementsByTagName("title");
+            if (t.getLength() > 0) {
+                String title = t.item(0).getTextContent();
+                if (title != null && !title.isBlank()) out.add(title.strip());
+            }
+        }
+        return out;
+    }
+
+    /** item마다 관련 뉴스 제목(ht:news_item_title)을 꺼낸다. 뉴스가 없는 item은 넣지 않는다. */
+    static Map<String, List<String>> parseNews(byte[] xml) throws Exception {
+        DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
+        f.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        f.setExpandEntityReferences(false);
+        NodeList items = f.newDocumentBuilder().parse(new ByteArrayInputStream(xml)).getElementsByTagName("item");
+        Map<String, List<String>> out = new LinkedHashMap<>();
+        for (int i = 0; i < items.getLength(); i++) {
+            Element item = (Element) items.item(i);
+            NodeList t = item.getElementsByTagName("title");
+            if (t.getLength() == 0 || t.item(0).getTextContent().isBlank()) continue;
+            List<String> heads = new ArrayList<>();
+            NodeList n = item.getElementsByTagName("ht:news_item_title");
+            for (int j = 0; j < n.getLength(); j++) {
+                String h = n.item(j).getTextContent();
+                if (h != null && !h.isBlank()) heads.add(h.strip());
+            }
+            if (!heads.isEmpty()) out.put(t.item(0).getTextContent().strip(), heads);
+        }
+        return out;
+    }
+}

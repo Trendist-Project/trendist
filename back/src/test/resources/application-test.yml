@@ -1,0 +1,15 @@
+# 테스트는 실제 DB를 건드리지 않도록 H2 메모리 DB(MySQL 모드)를 쓴다.
+spring:
+  datasource:
+    url: jdbc:h2:mem:trendist;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;NON_KEYWORDS=VALUE
+    username: sa
+    password: ""
+trendist:
+  titles:
+    # 칭호 검사를 같은 스레드에서 바로 한다(결과를 바로 확인하려고). 운영은 별도 스레드가 차례로 한다
+    sync-check: true
+  # 테스트에서는 외부(구글) 요청을 하지 않는다
+  google-trends:
+    enabled: false
+  news-search:
+    enabled: false
