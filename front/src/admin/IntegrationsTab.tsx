@@ -1,0 +1,92 @@
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { adminApi, type AdminIntegration } from '../api/client';
+import { successToast } from '../ui/toast';
+import { errMsg } from './format';
+
+/**
+ * 연동(13.15): 연동된 외부 사이트(검색·분석 도구)를 아이콘으로 바로 열어 본다. 아이콘이나 [열기]를 누르면 새 탭으로 이동하고,
+ * 주소는 바뀔 수 있어서 [주소 수정]으로 고친다(서버에 저장되어 모든 관리자에게 같다).
+ */
+const ICONS: Record<string, ReactNode> = {
+  NAVER_SEARCH_ADVISOR: (
+    <svg viewBox="0 0 48 48" aria-hidden="true"><rect width="48" height="48" rx="10" fill="#03c75a" /><path d="M15 12h7.4l4.6 8.1V12h6v24h-7.4L21 27.9V36h-6z" fill="#fff" /></svg>
+  ),
+  GOOGLE_SEARCH_CONSOLE: (
+    <svg viewBox="0 0 48 48" aria-hidden="true"><rect width="48" height="48" rx="10" fill="#fff" /><circle cx="21" cy="21" r="10" fill="none" stroke="#4285f4" strokeWidth="5" /><path d="M29 29l10 10" stroke="#ea4335" strokeWidth="6" strokeLinecap="round" /><path d="M16 22l4 4 7-8" fill="none" stroke="#34a853" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+  ),
+  GOOGLE_AI_STUDIO: (
+    <svg viewBox="0 0 48 48" aria-hidden="true">
+      <defs><linearGradient id="int-gemini" x1="8" y1="40" x2="40" y2="8" gradientUnits="userSpaceOnUse"><stop offset="0" stopColor="#4285f4" /><stop offset="0.55" stopColor="#9b72cb" /><stop offset="1" stopColor="#d96570" /></linearGradient></defs>
+      <rect width="48" height="48" rx="10" fill="#fff" />
+      <path fill="url(#int-gemini)" d="M24 40A17 17 0 0 0 7 24 17 17 0 0 0 24 8a17 17 0 0 0 17 16 17 17 0 0 0-17 16" />
+    </svg>
+  ),
+  INSTAGRAM: (
+    <svg viewBox="0 0 48 48" aria-hidden="true">
+      <defs><linearGradient id="int-insta" x1="6" y1="44" x2="42" y2="4" gradientUnits="userSpaceOnUse"><stop offset="0" stopColor="#feda75" /><stop offset="0.3" stopColor="#fa7e1e" /><stop offset="0.55" stopColor="#d62976" /><stop offset="0.8" stopColor="#962fbf" /><stop offset="1" stopColor="#4f5bd5" /></linearGradient></defs>
+      <rect width="48" height="48" rx="10" fill="url(#int-insta)" />
+      <rect x="12" y="12" width="24" height="24" rx="7" fill="none" stroke="#fff" strokeWidth="3" />
+      <circle cx="24" cy="24" r="6" fill="none" stroke="#fff" strokeWidth="3" />
+      <circle cx="31.5" cy="16.5" r="1.8" fill="#fff" />
+    </svg>
+  ),
+  GOOGLE_ANALYTICS: (
+    <svg viewBox="0 0 48 48" aria-hidden="true"><rect width="48" height="48" rx="10" fill="#fff" /><rect x="29" y="8" width="10" height="32" rx="5" fill="#f9ab00" /><rect x="18" y="19" width="10" height="21" rx="5" fill="#e37400" /><circle cx="13" cy="35" r="5" fill="#e37400" /></svg>
+  ),
+};
+
+export function IntegrationsTab() {
+  const [list, setList] = useState<AdminIntegration[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { adminApi.integrations().then(setList).catch((e) => setError(errMsg(e))); }, []);
+
+  async function save(e: FormEvent, code: string) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const saved = await adminApi.updateIntegration(code, draft);
+      setList((l) => l?.map((x) => (x.code === code ? saved : x)) ?? l);
+      setEditing(null); setError(null);
+      successToast('주소를 저장했어요');
+    } catch (err) { setError(errMsg(err)); } finally { setBusy(false); }
+  }
+
+  return (
+    <section className="admin-panel">
+      <p className="muted small">연동된 사이트예요. 아이콘이나 [열기]를 누르면 새 탭으로 바로 이동해요. 주소가 바뀌면 [주소 수정]으로 고쳐 주세요.</p>
+      {error && <p className="error" role="alert">{error}</p>}
+      {!list ? <p className="muted">불러오는 중…</p> : (
+        <ul className="int-list">
+          {list.map((x) => (
+            <li key={x.code} className="admin-card int-card">
+              <div className="int-main">
+                <a className="int-icon" href={x.url} target="_blank" rel="noopener noreferrer" aria-label={`${x.label} 열기`}>{ICONS[x.code]}</a>
+                <div className="int-text">
+                  <a className="int-name" href={x.url} target="_blank" rel="noopener noreferrer">{x.label}</a>
+                  <span className="int-url muted small">{x.url}</span>
+                </div>
+                <div className="admin-actions">
+                  <a className="int-open" href={x.url} target="_blank" rel="noopener noreferrer">열기 ↗</a>
+                  {editing !== x.code && <button onClick={() => { setEditing(x.code); setDraft(x.url); setError(null); }}>주소 수정</button>}
+                </div>
+              </div>
+              {editing === x.code && (
+                <form className="int-edit" onSubmit={(e) => save(e, x.code)}>
+                  <input value={draft} onChange={(e) => setDraft(e.target.value)} disabled={busy} maxLength={500} aria-label={`${x.label} 주소`} placeholder="https://" autoFocus />
+                  <div className="admin-actions">
+                    <button className="primary" type="submit" disabled={busy || !draft.trim() || draft.trim() === x.url}>{busy ? '저장 중…' : '저장'}</button>
+                    <button type="button" disabled={busy} onClick={() => setEditing(null)}>취소</button>
+                  </div>
+                </form>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}

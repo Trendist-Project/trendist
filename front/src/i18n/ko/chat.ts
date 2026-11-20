@@ -1,0 +1,16 @@
+export default {
+  playerDetail: '{name} 상세 정보 보기',
+  resizeTip: '위쪽 손잡이를 끌어 높이를 조절해요 (더블클릭: 기본 높이)',
+  resize: '끌어서 채팅창 높이 조절',
+  label: '채팅',
+  emptyCollapsed: '아직 채팅이 없어요',
+  emptyOpen: '첫 메시지를 남겨 보세요. #키워드 를 쓰면 누르는 사람이 바로 검색해요',
+  search: '{kw} 검색',
+  report: '신고',
+  reportAria: '{name}의 메시지 신고',
+  connecting: '연결 중…',
+  placeholder: 'Enter로 채팅 (#키워드 가능)',
+  inputLabel: '채팅 입력',
+  expand: '채팅 펼치기',
+  collapse: '채팅 접기',
+};

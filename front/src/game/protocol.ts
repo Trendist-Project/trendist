@@ -1,0 +1,200 @@
+/** 서버 스냅샷(big-endian): [u8 1][u32 tick][f32 half][u16 n] + n × [u32 e][f32 x][f32 y][f32 r][f32 score][u16 level][u8 me] */
+export interface EntityState { e: number; x: number; y: number; r: number; score: number; level: number; me: boolean }
+export interface Snapshot { tick: number; half: number; entities: EntityState[]; receivedAt: number }
+
+const ENTITY_SIZE = 23;
+
+export function parseSnapshot(buf: ArrayBuffer): Snapshot | null {
+  const v = new DataView(buf);
+  if (v.byteLength < 11 || v.getUint8(0) !== 1) return null;
+  const n = v.getUint16(9);
+  if (v.byteLength < 11 + n * ENTITY_SIZE) return null;
+  const entities: EntityState[] = [];
+  for (let i = 0; i < n; i++) {
+    const o = 11 + i * ENTITY_SIZE;
+    entities.push({
+      e: v.getUint32(o),
+      x: v.getFloat32(o + 4),
+      y: v.getFloat32(o + 8),
+      r: v.getFloat32(o + 12),
+      score: v.getFloat32(o + 16),
+      level: v.getUint16(o + 20),
+      me: v.getUint8(o + 22) === 1,
+    });
+  }
+  return { tick: v.getUint32(1), half: v.getFloat32(5), entities, receivedAt: performance.now() };
+}
+
+/** 미니맵(1초마다): [u8 2][u8 n] + n × [u32 e][f32 x][f32 y][f32 r]. 큰 아이콘 상위 20명, 큰 순서 */
+export interface MinimapEntry { e: number; x: number; y: number; r: number }
+
+const MINIMAP_ENTRY_SIZE = 16;
+
+export function parseMinimap(buf: ArrayBuffer): MinimapEntry[] | null {
+  const v = new DataView(buf);
+  if (v.byteLength < 2 || v.getUint8(0) !== 2) return null;
+  const n = v.getUint8(1);
+  if (v.byteLength < 2 + n * MINIMAP_ENTRY_SIZE) return null;
+  const out: MinimapEntry[] = [];
+  for (let i = 0; i < n; i++) {
+    const o = 2 + i * MINIMAP_ENTRY_SIZE;
+    out.push({ e: v.getUint32(o), x: v.getFloat32(o + 4), y: v.getFloat32(o + 8), r: v.getFloat32(o + 12) });
+  }
+  return out;
+}
+
+export interface Tuning {
+  maxSpeed: number;
+  minRadius: number;
+  maxRadius: number;
+  scoreCap: number;
+  zoomFactor: number;
+  /** 시야 배율(관리자 설정 view_range_multiplier): 가로·세로로 이 배수만큼 넓게 본다. 없으면 기본 2 */
+  viewRange?: number;
+  worldSize: number;
+}
+
+/** 방에 있는 엔티티의 이름표. bot이면 NPC 봇(4.21): 키워드가 없고 점수는 서버 메모리에만 있다. */
+/** title: 활성 칭호(4.10). bg·borderColor·borderWidth: 원의 꾸미기(4.9), 테두리가 null이면 기본 테두리. trail: 이동 효과 코드(4.23) */
+export interface RosterEntry {
+  e: number; nickname: string; level: number; bot?: boolean;
+  title?: string | null; bg?: string; borderColor?: string | null; borderWidth?: number | null; trail?: string | null;
+  /** 픽셀 그림 이미지 주소(4.9). 있으면 성장 캐릭터 대신 그린다 */
+  art?: string | null;
+  /** 테두리 효과 코드, 이름표 글자색·모양(4.9), 연속 빼앗기 콤보(4.25) */
+  borderEffect?: string | null; nameColor?: string | null; nameStyle?: string | null; combo?: number;
+}
+
+/** 스킬 코드(4.33). 서버 Room.SKILLS와 같다 */
+export type SkillId = string; // DB(skills)의 스킬 코드. 동작이 있는 코드는 서버 Room.SKILLS
+
+/** skillFx: id마다 담긴 값이 다르다. 충격파 = 쓴 자리와 반지름·속도, 갈고리 = 방향·사거리·ms, hookHit = 맞은 원(t)과 끌려오는 ms, stealth = 은신(유령) 시작과 지속 ms */
+/**
+ * 키워드를 잃은 원인(서버 KeywordLoss.Cause.code). fight 몸싸움·hook 갈고리·absorb 흡수는 이긴 쪽이 가져가고,
+ * poison 독·quake 충격파·fireball 화염구는 아무도 가져가지 않으며, flame 불꽃·death 체력 0은 가진 것의 일부를 잃는다
+ */
+export type LossCause = 'fight' | 'hook' | 'absorb' | 'poison' | 'quake' | 'fireball' | 'slow' | 'darkness' | 'silence' | 'stun' | 'root' | 'confuse' | 'zone' | 'burst' | 'flame' | 'death';
+/** 가진 것의 일부를 한꺼번에 잃는 원인(키워드 이름 없이 개수만 온다) */
+export const isPartLoss = (c: LossCause) => c === 'flame' || c === 'death';
+
+export type SkillFx =
+  | { id: 'repel'; e: number; x: number; y: number; r0: number; rMax: number; speed: number } // 반발(방어형: 밀어내기만)
+  | { id: 'quakeHit'; t: number; n: number } // 충격파가 원(t)에 닿아 키워드 n개를 잃게 했다(맞은 원 위에 표시)
+  | { id: 'quake'; e: number; x: number; y: number; r0: number; rMax: number; speed: number } // 충격파(닿은 원이 키워드를 잃는다)
+  | { id: 'hook'; e: number; dx: number; dy: number; range: number; ms: number }
+  | { id: 'hookHit'; e: number; t: number; ms: number }
+  | { id: 'hookEnd'; e: number }
+  | { id: 'stealth'; e: number; ms: number }
+  | { id: 'stealthEnd'; e: number }
+  | { id: 'zone'; e: number; x: number; y: number; r: number; ms: number; tickMs: number } // 장판: 원 e를 중심으로 따라다니는 반지름 r의 장판을 ms 동안 깔았다((x, y)는 깔 때의 자리, 쓰자마자 0초부터 tickMs마다 피해)
+  | { id: 'zoneEnd'; e: number } // 시전자 e의 장판이 일찍 끝났다(시전자가 나감·죽음)
+  | { id: 'burstFuse'; t: number; ms: number } // 터지는 총알에 맞은 원(t)이 ms 뒤에 터진다
+  | { id: 'burstBoom'; t: number; x: number; y: number } // 터지는 총알이 (x, y)에서 터졌다
+  | { id: 'bolt'; kind: 'poison' | 'darkness' | 'slow' | 'stun' | 'root' | 'silence' | 'confuse' | 'burst'; bid: number; e: number; x: number; y: number; dx: number; dy: number; speed: number; range: number; radius: number } // 독·암흑 투사체가 날아간다
+  | { id: 'boltEnd'; bid: number; hit?: number; x?: number; y?: number } // 투사체가 원(hit)에 맞았거나 사거리 끝에서 사라졌다
+  | { id: 'poison'; t: number; stacks: number; ms: number } // 원(t)이 독에 걸렸다(스택 수, 다 지나가는 데 걸리는 ms)
+  | { id: 'poisonEnd'; t: number }
+  | { id: 'darkness'; t: number; ms: number } // 원(t)이 암흑에 걸렸다(모두에게 표시. 정화는 cleanse 신호로 지운다)
+  | { id: 'slow'; t: number; stacks: number; ms: number } // 원(t)이 슬로우에 걸렸다(겹 수, 끝나는 데 걸리는 ms)
+  | { id: 'slowEnd'; t: number }
+  | { id: 'stun'; t: number; ms: number } // 원(t)이 스턴에 걸렸다
+  | { id: 'stunEnd'; t: number }
+  | { id: 'fireball'; fid: number; e: number; t: number; x: number; y: number; speed: number } // 화염구 한 발이 (x, y)에서 원 t를 쫓아 날아간다(한 번에 3발이 따로 온다)
+  | { id: 'fireballEnd'; fid: number; hit: boolean; t?: number; x?: number; y?: number }
+  | { id: 'absorb'; e: number; t: number; ms: number; range: number } // 원 e가 원 t와 흡수 선을 이었다(ms 동안, 사거리 range). 사거리 안의 원마다 하나씩 온다
+  | { id: 'absorbTick'; e: number; t: number } // 키워드 1개를 빼앗는 순간(이은 순간, 1초 뒤, 2초 뒤)
+  | { id: 'absorbEnd'; e: number; t?: number } // 선이 끊겼다
+  | { id: 'cleanse'; e: number } // 정화를 썼다(초록 고리)
+  | { id: 'root'; t: number; ms: number } // 원(t)이 속박에 걸렸다(이동 불가). 정화는 cleanse 신호로 지운다
+  | { id: 'rootEnd'; t: number }
+  | { id: 'amplify'; e: number; ms: number } // 원 e의 주는 피해가 2배(공격 증폭)
+  | { id: 'amplifyEnd'; e: number }
+  | { id: 'fortify'; e: number; ms: number } // 원 e의 받는 피해가 절반(피해 감소)
+  | { id: 'fortifyEnd'; e: number }
+  | { id: 'silence'; t: number; ms: number } // 원(t)이 침묵에 걸렸다(스킬 불가, 이동 가능)
+  | { id: 'silenceEnd'; t: number }
+  | { id: 'berserk'; e: number; pct: number } // 광폭화 켜짐/갱신. pct는 잃은 체력 비율(0~100). 끌 때까지 이어진다
+  | { id: 'berserkEnd'; e: number }
+  | { id: 'confuse'; t: number; ms: number } // 원(t)이 혼란에 걸렸다(조작 반전)
+  | { id: 'confuseEnd'; t: number }
+  | { id: 'barrier'; e: number; ms: number; pct: number; max: number } // 원 e가 보호막(쉴드)을 둘렀다: 10초, 쉴드량은 최대 체력 대비 절대 %(pct 현재, max 처음 값, 기본 50). 체력과 별개로 위에 쌓인다
+  | { id: 'barrierHit'; e: number; pct: number } // 쉴드가 피해를 먼저 받았다(남은 쉴드량 pct, 최대 체력 대비 %)
+  | { id: 'barrierEnd'; e: number; broken?: boolean } // 쉴드가 사라졌다(broken: 다 닳아 깨졌다. 아니면 시간이 끝났다)
+  | { id: 'heal'; e: number } // 회복을 썼다(그 원에 초록 + 표시. 내 것은 hp 메시지가 따로 띄우니 남의 것만 그린다)
+
+/** 몬스터(보스, 4.35) 메시지. 상태는 5Hz, 나머지는 사건이 있을 때 온다 */
+export type MonsterMessage =
+  | ({ type: 'monster' } & import('./monsterFx').MonsterState)
+  | { type: 'monsterAlert'; name: string; en: string; seconds: number } // 곧 나온다(나오기 전 예고)
+  | { type: 'monsterSpawn'; id: number; name: string; en: string; max: number; durationMs: number }
+  | ({ type: 'monsterFx' } & import('./monsterFx').MonsterFxMsg)
+  | ({ type: 'monsterHit' } & import('./monsterFx').MonsterHitMsg) // 누가 보스를 쳐서 입힌 피해
+  | { type: 'monsterEnd'; id: number; name: string; en: string; result: 'KILLED' | 'TIMEOUT' | 'REMOVED'; max: number; hp: number; top: { playerId: number; nickname: string; damage: number; hits: number }[] }
+  | { type: 'monsterReward'; name: string; en: string; cleared: boolean; rank: number; damage: number; exp: number; levelPercent?: number; keywords: string[] }; // 내 보상(levelPercent: 기여도로 받은 레벨 진행 %)
+
+export type ServerMessage =
+  | MonsterMessage
+  | { type: 'spectating'; country: string; spectators: number } // 관전 접속이 받아들여짐(관리자 관전, 13.13)
+  | { type: 'welcome'; entityNo: number; playerId: number; x: number; y: number; score: number; level: number }
+  | ({ type: 'tuning' } & Tuning)
+  | { type: 'died'; by: string; byE: number; cause?: 'hp' } // 죽음(4.31): 키워드가 없는 채로 져서 죽었다(cause: hp면 체력이 모두 닳았다, 4.36). 죽인 쪽 이름
+  | { type: 'hp'; e: number; hp: number; max: number; pct: number; heal?: number } // 내 체력(4.36): 바뀔 때마다. pct는 올림한 %, heal은 방금 회복한 %
+  | { type: 'hps'; list: [number, number][] } // 체력바 공개(설정 hp_public)일 때 모두의 체력: [원 번호, %]. 목록에 없는 원은 100%
+  | { type: 'hpHit'; e: number; by: number; dmg: number; pct: number } // 맞았다: 맞은 원, 때린 원, 깎인 %(최대 체력 기준), 남은 %
+  | { type: 'kill'; target: string } // 내가 상대를 죽였다(4.31)
+  | { type: 'levelFx'; e: number; level: number } // 레벨업 이펙트(4.30): 그 원에서 빛기둥이 솟는다
+  | { type: 'dashFx'; e: number; ms: number } // 누군가 대시를 시작했다(4.27): 그 원에 강조 효과를 그린다
+  | { type: 'dash'; ms: number; cooldownMs: number; mult: number } // 대시 시작(4.27): 지속 시간, 다시 쓸 수 있을 때까지, 속도 배수
+  | { type: 'skill'; id: SkillId; cooldownMs: number; activeMs?: number } // 내가 스킬을 썼다(4.33): 다시 쓸 수 있을 때까지, activeMs는 효과가 이어지는 시간(칸에 "켜져 있음" 표시)
+  | { type: 'cooldowns'; skills: Record<string, number>; dashActiveMs: number; dashReadyMs: number; dashMult: number } // 다시 들어왔을 때 서버가 알려 주는 지금 쿨타임(남은 ms, 4.33)
+  | { type: 'skillFail'; id: SkillId; reason: 'safe' | 'level' | 'unequipped' | 'hpFull' | 'noTarget' | 'silenced' | 'hpLow'; level?: number } // 스킬을 쓸 수 없었다(세이프존 안의 공격 스킬)
+  | { type: 'skillFx' } & SkillFx // 누군가 스킬을 썼다(4.33): 그 연출을 그린다
+  | { type: 'loadout'; slots: (string | null)[] } // 장착한 스킬 4칸(4.33). 입장할 때와 바뀔 때마다 온다. 빈 칸은 null
+  | { type: 'dark'; ms: number } // 내가 암흑에 맞았다(4.33): ms 동안 화면이 어두워진다
+  | { type: 'darkEnd' } // 정화로 암흑이 풀렸다
+  | { type: 'confuse'; ms: number } // 내가 혼란에 걸렸다: ms 동안 조작 방향이 반대(예측도 같이 뒤집는다)
+  | { type: 'confuseEnd' } // 정화로 혼란이 풀렸다
+  | { type: 'slow'; ms: number; mult: number; quiet?: boolean } // 내가 슬로우에 맞았다: ms 동안 이동 속도가 mult배(겹치면 더 작다)
+  | { type: 'slowEnd' } // 정화로 슬로우가 풀렸다
+  | { type: 'stun'; ms: number } // 내가 스턴에 맞았다: ms 동안 이동·스킬 불가
+  | { type: 'stunEnd' } // 정화로 스턴이 풀렸다
+  | { type: 'pullEnd' } // 정화로 갈고리에서 풀렸다
+  | { type: 'pull'; ms: number; byE: number } // 내가 갈고리에 맞았다(4.33): 쓴 원 번호(byE)에게 ms 동안 끌려온다. 그동안 이동·스킬 불가
+  | { type: 'roster'; players: RosterEntry[]; flameAt?: number }
+  | { type: 'emote'; e: number; code: string } // 이모트(4.26)
+  // 연속 빼앗기 콤보(4.25). event: up(+1) / start(flameAt에 닿아 불꽃이 붙음) / reset(잃어서 콤보 끝) / broken(잃어서 불꽃까지 꺼짐, by가 끈 사람)
+  | { type: 'combo'; e: number; nickname: string; combo: number; event: 'up' | 'start' | 'reset' | 'broken' | 'expired'; flameAt: number; maxMs?: number; by?: string; byE?: number }
+  | { type: 'emergency'; notice: import('../api/types').EmergencyNotice | null } // 긴급 안내가 올라오거나 끝났다(4.29). null이면 걷는다
+  | { type: 'kicked'; message: string } // 관리자가 내보냄·계정 금지(13.10). 다시 연결하지 않는다
+  | { type: 'titleGranted'; titleId: number; name: string; description: string } // 새 칭호를 받았다(4.10). titleId는 [장착하기]에 쓴다
+  | { type: 'score'; score: number; exp: number; nextExp: number; level: number; holdCount: number } // exp = 지금 레벨에서 모은 EXP, nextExp = 다음 레벨에 필요한 EXP(최고 레벨이면 -1)
+  | { type: 'lost'; cause: LossCause; by: string; count: number; score: number; keyword?: string; stolen?: boolean } // 내가 잃음(4.3): count개, 점수 합계 score, keyword는 하나일 때 그 이름·여럿이면 첫 하나(불꽃·죽음은 없음). stolen이면 상대가 가져감. 서버 LossMessages와 짝
+  // 공격 성공: 상대가 잃은 키워드와 점수(봇은 이름 없음). 사람에게서 이기면 빼앗는다:
+  // stolen ADDED = 내 보관함에 새로 들어감(gained = 늘어난 유행도), RENEWED = 이미 가진 키워드라 남은 시간만 24시간으로.
+  // BOT = 봇을 이겨 🔥 키워드를 새로 얻음, BOT_RENEWED = 봇을 이겼는데 이미 가진 키워드라 남은 시간만 24시간으로
+  | { type: 'hit'; cause: LossCause; target: string; count: number; score: number; keyword?: string; stolen?: 'ADDED' | 'RENEWED' | 'BOT' | 'BOT_RENEWED'; gained?: number } // 내가 상대에게서 잃게 함: stolen이 있으면 그 키워드를 가져왔다
+  | { type: 'invincibility'; e: number; ms: number }                         // 키워드를 잃은 원의 무적 시간(카운트다운)
+  | { type: 'knock'; dx: number; dy: number; ms: number }             // 내 원이 튕김: 전체 밀려날 거리와 시간
+  | { type: 'pong'; t: number }
+  | { type: 'orbs'; orbs: [number, number, number, number?][] } // 마지막 값 1이면 ! 구슬
+  | { type: 'orbSpawn'; id: number; x: number; y: number; prize?: boolean } // prize: ! 구슬
+  | { type: 'orbEaten'; id: number; e: number }
+  | { type: 'safeZones'; center: number; zones: [number, number, number, number, number][] } // 세이프존(4.22): 가운데 한 변, [번호, x, y, 한 변, 남은 ms]
+  | ChatMessage
+  | { type: 'chatHistory'; messages: ChatMessage[] }
+  | { type: 'chatError'; code: string; message: string }
+  | OrbResult;
+
+/** 채팅 한 줄(4.13). e는 보낸 사람의 세션 엔티티 번호, at은 보낸 시각(ms). */
+export interface ChatMessage { type: 'chat'; id: number; e: number; nickname: string; text: string; at: number }
+
+/** ? 구슬을 먹은 결과(4.20). GAINED: 새로 보관함에, RENEWED: 이미 가진 키워드(만료시간만 갱신), LOST: 내 키워드 하나를 잃음(gained = 줄어든 유행도), MISS: 잃을 키워드도 없는 꽝, NONE: 🔥 키워드가 없음 */
+export interface OrbResult {
+  type: 'orbResult';
+  status: 'GAINED' | 'RENEWED' | 'LOST' | 'MISS' | 'NONE';
+  text?: string;
+  state?: string;
+  trendValue?: number;
+  holderCount?: number;
+  gained?: number;
+}

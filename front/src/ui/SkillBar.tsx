@@ -1,0 +1,109 @@
+import { useEffect, useRef, useState } from 'react';
+import { t, tOr } from '../i18n';
+import type { SkillId } from '../game/protocol';
+import type { SkillInfo } from '../api/types';
+import { keyLabel, type SlotKeys } from '../game/skillKeys';
+import { SkillIcon } from './SkillIcon';
+import { categoryKey } from './skillMeta';
+
+/** readyAt: 스킬마다 다시 쓸 수 있는 시각(performance.now 기준 ms). 아직 안 썼으면 없다 */
+export type SkillCooldowns = Partial<Record<SkillId, number>>;
+
+/** 스킬을 눌렀지만 쓰이지 않았다(체력 가득·대상 없음·세이프존 등). n은 매번 올라가 같은 스킬이 연달아 실패해도 다시 깜빡인다 */
+export interface SkillDud { id: string; n: number }
+
+/** 대시 상태(4.27): until은 대시가 끝나는 시각, readyAt은 다시 쓸 수 있는 시각(둘 다 performance.now 기준 ms). 아직 안 썼으면 null */
+export interface DashState { until: number; readyAt: number }
+
+
+/**
+ * 스킬 버튼 줄(4.33). 장착한 5칸(slots, 대시도 한 칸)을 보여 주고, 칸의 키(keys)는 사용자가 바꾼 것이 있으면 그것을 쓴다. 스킬 목록·아이콘·쿨타임은 DB에서 온다(useSkills).
+ * 빈 칸을 누르면 스킬창이 열린다. 마우스를 올리거나 키보드로 포커스하면 툴팁 카드(이름·키·종류·쿨타임·설명·지금 상태)가 위로 뜬다.
+ * 대시(dash)가 든 칸은 대시 상태로, 나머지는 서버가 알려 준 쿨타임으로 보인다.
+ */
+export function SkillBar({ skills, slots, keys, level, cooldowns, skillOn, skillActive, dud, dash, lockedUntil, onUse, onDash, onOpenWindow }: {
+  skills: SkillInfo[]; slots: (string | null)[]; keys: SlotKeys; level: number; cooldowns: SkillCooldowns; skillOn?: ReadonlySet<string>; skillActive?: SkillCooldowns; dud?: SkillDud | null; dash: DashState | null; lockedUntil: number | null;
+  onUse: (id: SkillId) => void; onDash: () => void; onOpenWindow: () => void;
+}) {
+  // 지금 시각은 그리는 순간마다 새로 잰다. 상태로 들고 있으면 쿨타임이 없던 동안 낡은 값이 남아서, 쓴 직후에 30초가 31초로 보였다
+  const [, setTick] = useState(0);
+  const now = performance.now();
+  const hooked = lockedUntil !== null && now < lockedUntil; // 갈고리에 잡혀 끌려오는 동안은 모든 스킬이 잠깐 못 쓴다(4.33)
+  const busy = hooked || (dash !== null && dash.readyAt > now) || Object.values(cooldowns).some((r) => r !== undefined && r > now) || Object.values(skillActive ?? {}).some((r) => r !== undefined && r > now);
+  useEffect(() => {
+    if (!busy) return;
+    const id = window.setInterval(() => setTick((n) => n + 1), 200);
+    return () => window.clearInterval(id);
+  }, [busy]);
+  const seenTotal = useRef<Record<string, number>>({}); // 스킬마다 이번 쿨타임에서 처음 본 가장 큰 남은 시간(= 전체 쿨타임). 가림막 높이의 기준이다
+  // 대시도 칸에 장착하는 스킬이라 다른 스킬과 같이 장착한 칸에 나온다(기본은 5번 칸)
+  const entries: { skill: SkillInfo | null; key: string; slot: number | null }[] =
+    slots.map((code, i) => ({ skill: (code && skills.find((k) => k.code === code)) || null, key: keys.slots[i], slot: i }));
+  return (
+    <div className="skill-row" role="group" aria-label={t('gamescreen.skills')}>
+      {entries.map(({ skill: s, key: keyCode, slot }) => {
+        const key = keyLabel(keyCode);
+        if (!s) { // 빈 칸: 누르면 스킬창
+          return (
+            <div key={`empty-${slot}`} className="skill-slot">
+              <button type="button" className="skill-btn empty" onClick={(e) => { e.currentTarget.blur(); onOpenWindow(); }}
+                      aria-label={`${t('gamescreen.skillEmptySlot')} (${key})`} title={t('gamescreen.skillEmptySlotTip')}>
+                <span className="skill-icon" aria-hidden="true">＋</span>
+                {key && <kbd>{key}</kbd>}
+              </button>
+            </div>
+          );
+        }
+        const isDash = s.code === 'dash';
+        const locked = s.requiredLevel > level; // 아직 해금 레벨이 안 됐다(4.33)
+        // 효과가 이어지는 동안(대시 중, 장판·무적 등이 켜져 있는 동안)은 칸에 그 남은 지속 시간이 카운트다운되고, 끝나면 쿨타임 숫자로 바뀐다
+        const activeUntil = isDash ? dash?.until ?? 0 : skillActive?.[s.code] ?? 0;
+        const active = activeUntil > now;
+        const readyAt = isDash ? dash?.readyAt ?? 0 : cooldowns[s.code] ?? 0;
+        const left = Math.max(0, readyAt - now);
+        const shown = active ? activeUntil - now : left;
+        if (left <= 0) delete seenTotal.current[s.code]; else seenTotal.current[s.code] = Math.max(seenTotal.current[s.code] ?? 0, left);
+        const listed = s.cooldownSeconds * 1000;
+        const total = Math.max(seenTotal.current[s.code] ?? 0, left, left <= listed ? listed : 0);
+        const veil = !locked && !hooked && !active && left > 0 ? Math.min(100, Math.max(0, (left / total) * 100)) : 0; // 남은 시간 비율(%)
+        const cat = categoryKey(s.category);
+        const name = tOr(`skills.${s.code}_name`, s.code), desc = tOr(`skills.${s.code}_desc`, '');
+        return (
+          <div key={s.code} className="skill-slot">
+            <button type="button" className={`skill-btn cat-${cat}${isDash ? ' dash-btn' : ''}${locked ? ' locked' : hooked ? ' hooked' : active ? ' active' : left > 0 ? ' cooling' : ''}${!locked && (active || skillOn?.has(s.code)) ? ' skill-on' : ''}`}
+                    aria-disabled={hooked || undefined}
+                    aria-label={`${name}${key ? ` (${key})` : ''}. ${locked ? t('gamescreen.skillLockedAria', { n: s.requiredLevel }) + ' ' : ''}${desc}`}
+                    onClick={(e) => { e.currentTarget.blur(); if (hooked) return; if (isDash) onDash(); else onUse(s.code); }}>
+              <span className="skill-icon"><SkillIcon code={s.code} /></span>
+              {dud?.id === s.code && <span key={dud.n} className="skill-dud" aria-hidden="true" />}
+              {veil > 0 && <span className="skill-veil-box" aria-hidden="true"><i className="skill-veil" style={{ height: `${veil}%` }} /></span>}
+              {key && <kbd>{key}</kbd>}
+              {hooked && !locked ? <span className="skill-hooked" aria-hidden="true">🪝</span>
+                : locked ? <span className="skill-lock" aria-hidden="true">🔒<b>{s.requiredLevel}</b></span>
+                : shown > 0 && <span className="skill-cd">{Math.ceil(shown / 1000)}</span>}
+            </button>
+            <div className="skill-tip" role="tooltip">
+              <div className="st-head">
+                <span className="st-icon" aria-hidden="true"><SkillIcon code={s.code} /></span>
+                <strong>{name}</strong>
+                {key && <kbd>{key}</kbd>}
+              </div>
+              <div className="st-meta">
+                <span className={`st-cat cat-${cat}`}>{t(`gamescreen.skillCat_${cat}`)}</span>
+                <span>{t('gamescreen.skillCooldown', { n: s.cooldownSeconds })}</span>
+                {s.requiredLevel > 1 && <span className="st-lv">{t('gamescreen.skillNeedLevel', { n: s.requiredLevel })}</span>}
+              </div>
+              {desc && <p className="st-desc">{desc}</p>}
+              <div className={`st-state${locked || hooked ? ' locked' : active ? ' on' : left > 0 ? ' wait' : ' ready'}`}>
+                {hooked && !locked ? t('gamescreen.skillHooked') : locked ? t('gamescreen.skillLocked', { n: s.requiredLevel, cur: level })
+                  : active ? t('gamescreen.skillActive', { n: Math.ceil(shown / 1000) })
+                  : left > 0 ? t('gamescreen.skillWait', { n: Math.ceil(left / 1000) })
+                  : t('gamescreen.skillReady')}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
