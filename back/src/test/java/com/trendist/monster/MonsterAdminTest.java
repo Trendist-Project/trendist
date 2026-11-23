@@ -42,6 +42,19 @@ class MonsterAdminTest {
         return mvc.perform(get(path).header("Authorization", a)).andExpect(status().isOk()).andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
     }
 
+    /** 떠 있는 elder_turtle(스케줄러가 먼저 소환했거나 앞 시험이 남긴 것)을 치우고 사라질 때까지 기다린다. 제거는 방 틱에서 처리된다 */
+    private void clearElderTurtle(String a) throws Exception {
+        java.util.List<Integer> ids = JsonPath.read(body(a, "/api/admin/monsters/live"), "$[?(@.code=='elder_turtle')].id");
+        for (int id : ids) mvc.perform(post("/api/admin/monsters/" + id + "/end?country=KR").header("Authorization", a));
+        for (int i = 0; i < 60 && !JsonPath.<java.util.List<Object>>read(body(a, "/api/admin/monsters/live"), "$[?(@.code=='elder_turtle')]").isEmpty(); i++) Thread.sleep(100);
+    }
+
+    /** 소환하고, 200이 아니면 응답 본문을 실패 메시지에 담는다 */
+    private void spawnElderTurtle(String a) throws Exception {
+        MvcResult r = mvc.perform(post("/api/admin/monsters/types/elder_turtle/spawn?country=KR").header("Authorization", a)).andReturn();
+        assertThat(r.getResponse().getStatus()).as(r.getResponse().getContentAsString(StandardCharsets.UTF_8)).isEqualTo(200);
+    }
+
     @Test
     void notAdminCannotUseIt() throws Exception {
         mvc.perform(get("/api/admin/monsters/types")).andExpect(status().isUnauthorized());
@@ -66,7 +79,8 @@ class MonsterAdminTest {
     @Test
     void spawnShowsInLiveThenRemoveRecordsHistory() throws Exception {
         String a = admin();
-        mvc.perform(post("/api/admin/monsters/types/elder_turtle/spawn?country=KR").header("Authorization", a)).andExpect(status().isOk());
+        clearElderTurtle(a);
+        spawnElderTurtle(a);
         // 이미 싸우는 중이면 다시 소환할 수 없다
         String live = "[]";
         for (int i = 0; i < 40 && "[]".equals(live); i++) { Thread.sleep(100); live = body(a, "/api/admin/monsters/live"); }
@@ -104,7 +118,8 @@ class MonsterAdminTest {
         spawns.save(new com.trendist.monster.entity.MonsterSpawn(type, kr, "SCHEDULE", "SKIPPED", java.time.Instant.now())); // 예전에 남긴 건너뜀 행
         mvc.perform(patch("/api/admin/monsters/types/elder_turtle").header("Authorization", a).contentType(MediaType.APPLICATION_JSON).content("{\"enabled\":true}")).andExpect(status().isOk());
         try {
-            mvc.perform(post("/api/admin/monsters/types/elder_turtle/spawn?country=KR").header("Authorization", a)).andExpect(status().isOk());
+            clearElderTurtle(a);
+            spawnElderTurtle(a);
             String tl = body(a, "/api/admin/monsters/timeline?past=2&ahead=3");
             java.util.List<String> countriesShown = JsonPath.read(tl, "$.countries");
             assertThat(countriesShown).contains("KR");
