@@ -46,4 +46,6 @@ tasks.withType<Test> {
     useJUnitPlatform()
     // 방의 난수(봇 움직임·구슬 자리 등)를 고정해 테스트가 매번 같은 결과를 내게 한다(Room.SEED_PROPERTY)
     systemProperty("trendist.room.seed", "20261113")
+    // 실패한 시험의 메시지까지 로그에 남긴다(CI에서만 나는 실패의 원인을 보려고)
+    testLogging { exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }
 }
