@@ -969,3 +969,9 @@ label.notice-toggle, .notice-toggle-main { display: flex; gap: 10px; align-items
 .tl-cc.killed i { background: #1f8a58; } .tl-cc.live i { background: #3fb68b; color: #06281c; } .tl-cc.timeout i { background: #b7791f; } .tl-cc.removed i { background: #b3414a; } .tl-cc.scheduled i { background: #3e6bb5; }
 .tl-cc.none { color: #7d93ab; }
 .tl-ctry { color: #9fb3c9; font-size: 0.72rem; font-weight: 800; }
+
+/* 서버 가동 시간(대시보드 머리) */
+.admin-uptime { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 0.8rem; white-space: nowrap; }
+.admin-uptime-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.admin-uptime-label { color: var(--muted); }
+.admin-uptime-time { font-variant-numeric: tabular-nums; }

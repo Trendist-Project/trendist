@@ -290,7 +290,10 @@ export interface Dashboard {
   share: { today: number; cards: number; views: number; plays: number };
 }
 
+export interface ServerInfo { startedAt: string; uptimeMillis: number }
+
 export const adminApi = {
+  system: () => request<ServerInfo>('GET', '/api/admin/system'),
   dashboard: () => request<Dashboard>('GET', `/api/admin/dashboard?country=${getAdminCountry()}`),
   statsSummary: () => request<StatSummary>('GET', `/api/admin/stats/summary?country=${getAdminCountry()}`),
   statsHourly: (hours: number) => request<StatRow[]>('GET', `/api/admin/stats/hourly?${qs({ country: getAdminCountry(), hours })}`),

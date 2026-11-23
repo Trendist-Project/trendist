@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { adminApi, type Dashboard, type StatPeriod, type StatRow } from '../api/client';
 import { STATE_BADGE } from '../ui/keywordFormat';
 import { Sparkline } from './charts';
+import { ServerUptime } from './ServerUptime';
 import { errMsg, fmt } from './format';
 
 /**
@@ -54,6 +55,7 @@ export function DashboardTab({ onGo }: { onGo: Go }) {
     <section className="admin-panel admin-dash">
       <div className="admin-stats-head">
         <h2>대시보드</h2>
+        <ServerUptime />
         <span className="muted small">{new Date(d.at).toLocaleTimeString('ko-KR')} 기준 · 30초마다 새로 읽어요</span>
         <button onClick={load}>새로고침</button>
       </div>
