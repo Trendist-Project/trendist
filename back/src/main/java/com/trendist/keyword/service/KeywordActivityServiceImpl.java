@@ -29,6 +29,7 @@ public class KeywordActivityServiceImpl implements KeywordActivityService {
     private static final int KEEP_DAYS = 180;
 
     private final KeywordRepository keywords;
+    private final com.trendist.keyword.repository.KeywordMergePartRepository mergeParts;
     private final KeywordLog24hRepository hourly;
     private final KeywordLogDailyRepository daily;
     private final PlayerKeywordRepository playerKeywords;
@@ -93,7 +94,7 @@ public class KeywordActivityServiceImpl implements KeywordActivityService {
     public KeywordDtos.Activity activity(long userId, long keywordId, String range) {
         Player p = playerService.requireCurrent(userId);
         Keyword k = keywords.findById(keywordId)
-                .filter(x -> x.getCountry().getId().equals(p.getCountry().getId()))
+                .filter(x -> !x.isMerged() && x.getCountry().getId().equals(p.getCountry().getId()))
                 .filter(x -> !CodeTables.KW_BANNED.equals(x.getKeywordState().getName()))
                 .orElseThrow(() -> ApiException.notFound("KEYWORD_NOT_FOUND", "키워드를 찾을 수 없어요"));
         return build(k, range);
@@ -101,9 +102,37 @@ public class KeywordActivityServiceImpl implements KeywordActivityService {
 
     @Override
     @Transactional(readOnly = true)
+    public KeywordDtos.Activity mergedActivity(long userId, long mergedKeywordId, String range) {
+        Player p = playerService.requireCurrent(userId);
+        Keyword m = keywords.findById(mergedKeywordId)
+                .filter(x -> x.isMerged() && x.getCountry().getId().equals(p.getCountry().getId()))
+                .orElseThrow(() -> ApiException.notFound("KEYWORD_NOT_FOUND", "키워드를 찾을 수 없어요"));
+        // 구성 원본의 활동 그래프를 같은 구간끼리 합산한다(시작 시각이 같은 점끼리)
+        Map<Instant, long[]> sum = new java.util.TreeMap<>();
+        Map<Instant, Boolean> live = new HashMap<>();
+        long search = 0, add = 0, holders = 0;
+        String zone = null;
+        for (Keyword part : keywords.findAllById(mergeParts.findPartIds(m.getId()))) {
+            if (CodeTables.KW_BANNED.equals(part.getKeywordState().getName())) continue;
+            KeywordDtos.Activity a = build(part, range);
+            zone = a.timezone();
+            search += a.searchCount(); add += a.addCount(); holders += a.holders();
+            for (KeywordDtos.ActivityPoint pt : a.points()) {
+                long[] v = sum.computeIfAbsent(pt.t(), t -> new long[3]);
+                v[0] += pt.search(); v[1] += pt.plus(); v[2] += pt.holders();
+                live.merge(pt.t(), pt.live(), Boolean::logicalOr);
+            }
+        }
+        List<KeywordDtos.ActivityPoint> points = new ArrayList<>();
+        sum.forEach((t, v) -> points.add(new KeywordDtos.ActivityPoint(t, v[0], v[1], v[2], live.get(t))));
+        return new KeywordDtos.Activity(range, zone == null ? m.getCountry().getTimezone() : zone, points, search, add, holders);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
     public KeywordDtos.Activity publicActivity(long keywordId, String range) {
         Keyword k = keywords.findById(keywordId)
-                .filter(x -> !CodeTables.KW_BANNED.equals(x.getKeywordState().getName()))
+                .filter(x -> !x.isMerged() && !CodeTables.KW_BANNED.equals(x.getKeywordState().getName()))
                 .orElseThrow(() -> ApiException.notFound("KEYWORD_NOT_FOUND", "키워드를 찾을 수 없어요"));
         return build(k, range);
     }

@@ -27,6 +27,8 @@ public class PlayerInfoServiceImpl implements PlayerInfoService {
     private final PlayerService playerService;
     private final PlayerRepository players;
     private final PlayerKeywordRepository playerKeywords;
+    private final com.trendist.keyword.repository.KeywordRepository keywordRepo;
+    private final com.trendist.keyword.repository.KeywordMergePartRepository mergeParts;
     private final TitleRepository titles;
     private final ScoreHistoryService scoreHistory;
     private final RoomManager rooms;
@@ -63,11 +65,18 @@ public class PlayerInfoServiceImpl implements PlayerInfoService {
         return build(userId, p, -1, p.getNickname(), p.getLevel(), live != null ? Math.round(live) : p.getCurrentScore());
     }
 
+    /** 합성 키워드(4.44)는 구성 원본 이름을 띄어 써서 보여 준다. */
+    private String displayText(com.trendist.keyword.entity.Keyword k) {
+        if (!k.isMerged()) return k.getText();
+        var parts = com.trendist.keyword.support.MergeKey.sorted(keywordRepo.findAllById(mergeParts.findPartIds(k.getId())));
+        return parts.isEmpty() ? k.getText() : com.trendist.keyword.support.MergeKey.display(parts);
+    }
+
     private PlayerDtos.PlayerCard build(long userId, Player p, int entityNo, String nickname, long level, long score) {
         List<PlayerDtos.KeywordTag> top = playerKeywords.findTopByPlayer(p.getId(), Instant.now(clock),
                         codes.keywordStateId(CodeTables.KW_BANNED), PageRequest.of(0, TOP_KEYWORDS)).stream()
-                .map(pk -> new PlayerDtos.KeywordTag(pk.getKeyword().getId(), pk.getKeyword().getText(),
-                        pk.getKeyword().getKeywordState().getName()))
+                .map(pk -> new PlayerDtos.KeywordTag(pk.getKeyword().getId(), displayText(pk.getKeyword()),
+                        pk.getKeyword().getKeywordState().getName(), pk.getKeyword().isMerged(), pk.getKeyword().getStarCount()))
                 .toList();
         String title = p.getTitleId() == null ? null : titles.findById(p.getTitleId()).map(t -> t.name(com.trendist.common.support.Lang.ofLocale(p.getCountry().getDefaultLocale()))).orElse(null);
         return new PlayerDtos.PlayerCard(entityNo, nickname, title,

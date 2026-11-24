@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Notice, PlayerSummary } from '../api/types';
+import type { MergeResult, Notice, PlayerSummary } from '../api/types';
 import { Arena } from '../game/Arena';
 import { GameConnection } from '../game/connection';
 import type { ChatMessage, ServerMessage } from '../game/protocol';
 import { ChatPanel, type ChatLine } from './ChatPanel';
 import { GuideModal } from './GuideModal';
 import { KeywordModal } from './KeywordModal';
+import { MergedKeywordModal } from './MergedKeywordModal';
 import { startGoogleLogin } from '../googleAuth';
 import { adminApi, api, ApiFailure } from '../api/client';
 import { PlayerInfoModal } from './PlayerInfoModal';
@@ -29,7 +30,8 @@ import { SkillWindow } from './SkillWindow';
 import { BottomBar } from './BottomBar';
 import { WheelModal } from './WheelModal';
 import { successToast } from './toast';
-import { loadSideHidden, saveSideHidden, loadMinimapPref, saveMinimapPref, loadLeaderboardPref, saveLeaderboardPref, loadChatView, saveChatView, loadHelpPref, saveHelpPref, pingQuality, type ChatView } from './gamePrefs';
+import { loadSideHidden, saveSideHidden, loadSideWidth, loadSideHeight, loadMinimapPref, saveMinimapPref, loadLeaderboardPref, saveLeaderboardPref, loadChatView, saveChatView, loadHelpPref, saveHelpPref, pingQuality, saveSideSize, applySideVars, type ChatView } from './gamePrefs';
+import { startUiSync } from './uiSync';
 import { LayersProvider, useLayer } from './layers';
 import { useMultiTouchClicks } from './touchPress';
 import { FullscreenIcon } from './FullscreenIcon';
@@ -148,7 +150,9 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     setOrbReveal({ result, key });
     window.setTimeout(() => setOrbReveal((cur) => (cur?.key === key ? null : cur)), ORB_REVEAL_MS);
   }, []);
-  const [openKeyword, setOpenKeyword] = useState<number | null>(null);
+  const [openKeyword, setOpenKeywordId] = useState<number | null>(null);
+  const [openKeywordMerged, setOpenKeywordMerged] = useState(false); // 합성 키워드(4.44)는 전용 상세 창이 열린다
+  const setOpenKeyword = useCallback((id: number | null, merged = false) => { setOpenKeywordMerged(merged); setOpenKeywordId(id); }, []);
   const [infoEntity, setInfoEntity] = useState<number | null>(null);
   const [infoPlayerId, setInfoPlayerId] = useState<number | null>(null); // 채팅의 닉네임·검색으로 연 플레이어 상세
   const [infoLook, setInfoLook] = useState<OrbLook | null>(null); // 정보 창에 보여 줄 그 원의 모양
@@ -333,6 +337,17 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   }, [showMinimap]);
 
   useEffect(() => { saveLeaderboardPref(showLeaderboard); }, [showLeaderboard]);
+  // 화면 선택(미니맵·리더보드·채팅·조작 설명·오른쪽 영역·패널 크기·자동 전체 화면)을 계정에 맞춘다. 서버 값이 우선
+  useEffect(() => startUiSync((p) => {
+    setShowMinimap(p.minimap); saveMinimapPref(p.minimap);
+    setShowLeaderboard(p.leaderboard); saveLeaderboardPref(p.leaderboard);
+    setChatView(p.chat); saveChatView(p.chat);
+    setShowHelp(p.help); saveHelpPref(p.help);
+    setSideHidden(p.sideHidden); saveSideHidden(p.sideHidden);
+    setAutoFullscreenPref(p.autoFullscreen);
+    saveSideSize(p.sideWidth, p.sideHeight);
+  }), []);
+  useEffect(() => { applySideVars(loadSideWidth(), loadSideHeight()); }, []); // 저장된 패널 크기를 CSS 변수로
   useEffect(() => {
     arenaRef.current?.setBubblesVisible(chatView !== 'off');
     saveChatView(chatView);
@@ -376,6 +391,15 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     if (gained > 0) arenaRef.current?.floatText(`+${gained}`);
     playSfx('plus'); tutorialApi.current?.event('plus');
   }, []);
+  // 키워드 합성(4.44): 점수·보유 수를 서버 값으로 맞추고, 소리와 알림을 낸다(보관함 갱신·카드 연출은 SidePanel이 한다)
+  const onMerged = useCallback((r: MergeResult) => {
+    setPlayer(r.player);
+    if (r.gained > 0) arenaRef.current?.floatText(`+${r.gained}`);
+    playSfx(r.bonus ? 'mergeBonus' : 'merge');
+    // 합성 결과는 구슬 결과와 같은 카드 자리에 별·이름·점수로 보여 준다(빨간 오류 알림 모양이 아니라 보상 카드)
+    showReveal({ type: 'orbResult', status: 'GAINED', text: r.keyword.text, gained: r.gained,
+      merge: { stars: r.keyword.stars, bonus: r.bonus, bonusText: r.bonusPart?.text } });
+  }, [showReveal]);
   // 키워드 상세 창에서 +하면 보관함도 새로 읽는다
   const onPlusedInModal = useCallback((gained: number, p: PlayerSummary) => {
     onPlused(gained, p);
@@ -395,7 +419,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     setChatView((v) => (v === 'off' ? 'open' : v));
   }, [showToast]);
   const searchKeyword = useCallback((text: string) => setSearchRequest({ text, key: performance.now() }), []);
-  const closeKeyword = useCallback(() => setOpenKeyword(null), []);
+  const closeKeyword = useCallback(() => setOpenKeyword(null), [setOpenKeyword]);
 
   return (
     <div className="game-shell">
@@ -612,17 +636,20 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
           {toast && <div className="toast" role="status">{toast}</div>}
         </div>
       </div>
-      <SidePanel onPlused={onPlused} refreshKey={refreshKey} onError={showToast} onHide={() => setSide(true)}
+      <SidePanel onPlused={onPlused} onMerged={onMerged} refreshKey={refreshKey} onError={showToast} onHide={() => setSide(true)}
                  onOpenKeyword={setOpenKeyword} onSharePlayer={sharePlayer} searchRequest={searchRequest} openRequest={sideRequest} />
       {infoEntity !== null && (
         <PlayerInfoModal entityNo={infoEntity} bot={infoBot} look={infoLook} onClose={() => setInfoEntity(null)}
-                         onOpenKeyword={(id) => { setInfoEntity(null); setOpenKeyword(id); }} onNotice={showToast} onShare={sharePlayer} />
+                         onOpenKeyword={(id, merged) => { setInfoEntity(null); setOpenKeyword(id, merged); }} onNotice={showToast} onShare={sharePlayer} />
       )}
       {infoPlayerId !== null && (
         <PlayerInfoModal entityNo={-1} playerId={infoPlayerId} onClose={() => setInfoPlayerId(null)}
-                         onOpenKeyword={(id) => { setInfoPlayerId(null); setOpenKeyword(id); }} onNotice={showToast} onShare={sharePlayer} />
+                         onOpenKeyword={(id, merged) => { setInfoPlayerId(null); setOpenKeyword(id, merged); }} onNotice={showToast} onShare={sharePlayer} />
       )}
-      {openKeyword !== null && (
+      {openKeyword !== null && openKeywordMerged && (
+        <MergedKeywordModal keywordId={openKeyword} onClose={closeKeyword} onPlused={onPlusedInModal} onError={showToast} onShare={shareKeyword} />
+      )}
+      {openKeyword !== null && !openKeywordMerged && (
         <KeywordModal keywordId={openKeyword} onClose={closeKeyword} onPlused={onPlusedInModal} onError={showToast} onShare={shareKeyword} />
       )}
       {panel === 'notice' && <NoticeModal onClose={closePanel} onRead={() => setNoticeDot(false)} />}

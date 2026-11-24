@@ -7,6 +7,9 @@ public final class KeywordPageEvents {
     /** countryCode는 나라 코드(KR·GLOBAL), normalized는 정규화 키 */
     public record Changed(String countryCode, String normalized) {}
 
+    /** 일반 키워드가 🔥에서 💤비활성이 됐다(커밋 뒤 그 키워드가 든 합성 키워드에서 그 원본을 뺀다, 4.44) */
+    public record Deactivated(long keywordId) {}
+
     /** 키워드가 금지됐다(커밋 뒤 모든 플레이어의 보관함에서 그 키워드와, 금지어가 들어 있는 키워드를 지운다, 4.7) */
     public record Banned(String countryCode, String normalized) {}
 }

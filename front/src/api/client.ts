@@ -1,9 +1,10 @@
 import { getCountry, getLang } from '../country';
 import { errorText } from '../i18n';
 import { getAdminCountry } from './adminCountry';
+import type { UiPrefsResponse } from './types';
 import type { ThemeConfig } from '../game/theme/ThemeLayer';
 import type {
-  WheelStatus, WheelSpinResult, Activity, ActivityRange, PlayerCard, PlayerHit, PopularityResult, ScoreHistory, ScoreRange, CommentItem, CommentPage, GuideArticle, GuideCategory, KeywordCard, Me, MyKeyword, Notice, PlayerSummary, 
+  WheelStatus, WheelSpinResult, Activity, ActivityRange, PlayerCard, PlayerHit, PopularityResult, ScoreHistory, ScoreRange, CommentItem, CommentPage, GuideArticle, GuideCategory, KeywordCard, GradeInfo, Me, MyKeyword, MergePreview, MergeResult, MergedDetail, Notice, PlayerSummary, 
   AiCommentPage, AiCommentRow, EmergencyNotice, Look, LevelBadge, PixelArtData, ProfileBox, ProfileSave, ShareCardCreated, PlusResult, RankingEntry, SearchResult, TitleBox, TokenResponse, VoteResult, SkillInfo, KeybindingsResponse } from './types';
 
 /** 소리 설정(4.39): 켜짐과 음량(0~100) */
@@ -122,6 +123,8 @@ export const api = {
   skills: () => request<SkillInfo[]>('GET', '/api/skills'),
   /** 내 소리 설정(4.39, 계정 기준). saved가 false면 저장한 적이 없는 것 */
   soundSettings: () => request<SoundPrefsResponse>('GET', '/api/me/sound'),
+  uiSettings: () => request<UiPrefsResponse>('GET', '/api/me/ui-settings'),
+  saveUiSettings: (b: Omit<UiPrefsResponse, 'saved'>) => request<UiPrefsResponse>('PUT', '/api/me/ui-settings', b),
   saveSoundSettings: (b: Omit<SoundPrefsResponse, 'saved'>) => request<SoundPrefsResponse>('PUT', '/api/me/sound', b),
   /** 아레나 배경 테마·날씨 설정(4.38): 로그인 없이 읽는다. 서버가 정한 모드와 그 나라 위치·시각을 준다 */
   arenaTheme: (country: string = getCountry()) => request<ThemeConfig>('GET', `/api/arena-theme?country=${country}`),
@@ -170,8 +173,14 @@ export const api = {
   search: (q: string) => request<SearchResult>('GET', `/api/keywords/search?q=${encodeURIComponent(q)}`),
   plus: (text: string) => request<PlusResult>('POST', '/api/keywords/plus', { text }),
   myKeywords: () => request<MyKeyword[]>('GET', '/api/me/keywords'),
+  /** 키워드 합성(4.44): 미리보기(항상 200, ok=false면 reason) → 확정 */
+  mergePreview: (a: number, b: number) => request<MergePreview>('GET', `/api/me/keywords/merge-preview?a=${a}&b=${b}`),
+  merge: (first: number, second: number) => request<MergeResult>('POST', '/api/me/keywords/merge', { first, second }),
+  mergedDetail: (id: number) => request<MergedDetail>('GET', `/api/keywords/merged/${id}`),
+  mergedActivity: (id: number, range: ActivityRange) => request<Activity>('GET', `/api/keywords/merged/${id}/activity?range=${range}`),
   /** 자랑하기 카드 공유 주소(4.24). 서버가 지금 값으로 저장하고 주소를 준다. 같은 값이면 같은 주소 */
   createShareCard: () => request<ShareCardCreated>('POST', '/api/share-cards'),
+  keywordGrades: () => request<GradeInfo>('GET', '/api/keywords/grades'),
   keyword: (id: number) => request<KeywordCard>('GET', `/api/keywords/${id}`),
   /** AI 한 줄 설명이 맞지 않다는 갱신 요청(4.12) */
   requestAiComment: (id: number) => request<void>('POST', `/api/keywords/${id}/ai-comment/request`),

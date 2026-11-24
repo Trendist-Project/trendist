@@ -5,7 +5,7 @@ import { fmtNumber, t } from '../i18n';
 import { PlayerInfoModal } from './PlayerInfoModal';
 
 /** 닉네임으로 같은 나라 플레이어를 찾고 인기도를 올리거나 내린다(4.34). 접속 중이 아니어도 찾는다. */
-export function PlayerSearch({ onOpenKeyword, onShare }: { onOpenKeyword(keywordId: number): void; onShare?(playerId: number, nickname: string): void }) {
+export function PlayerSearch({ onOpenKeyword, onShare }: { onOpenKeyword(keywordId: number, merged?: boolean): void; onShare?(playerId: number, nickname: string): void }) {
   const [q, setQ] = useState('');
   const [hits, setHits] = useState<PlayerHit[] | null>(null);
   const [msg, setMsg] = useState<string | null>(null);

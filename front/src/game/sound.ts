@@ -3,7 +3,7 @@
  * 브라우저는 사용자가 한 번 누르거나 키를 누를 때까지 소리를 막으므로, 첫 입력 때 컨텍스트를 깨운다.
  * 효과음은 기본 켜짐, 배경음은 기본 꺼짐이다. 둘 다 이 브라우저에 기억한다. 같은 소리는 짧은 시간에 몰려도 한 번만 낸다.
  */
-export type Sfx = 'plus' | 'gain' | 'lose' | 'hit' | 'kill' | 'dash' | 'levelup' | 'boss' | 'orb' | 'skill' | 'hurt' | 'death' | 'combo';
+export type Sfx = 'plus' | 'gain' | 'lose' | 'hit' | 'kill' | 'dash' | 'levelup' | 'boss' | 'orb' | 'skill' | 'hurt' | 'death' | 'combo' | 'merge' | 'mergeBonus';
 
 const SFX_KEY = 'trendist.sfx', BGM_KEY = 'trendist.bgm';
 const VOL_KEYS = { master: 'trendist.vol.master', sfx: 'trendist.vol.sfx', bgm: 'trendist.vol.bgm' } as const;
@@ -86,7 +86,7 @@ function noise(c: AudioContext, at: number, dur: number, vol: number, from: numb
 const N = (semi: number) => 440 * Math.pow(2, (semi - 9) / 12); // 가온 다(0)를 기준으로 한 음 높이
 
 /** 소리마다 다시 낼 수 있는 최소 간격(ms): 한꺼번에 몰려도 시끄럽지 않게 */
-const GAP: Partial<Record<Sfx, number>> = { hit: 90, hurt: 120, skill: 70, plus: 60, orb: 100 };
+const GAP: Partial<Record<Sfx, number>> = { hit: 90, hurt: 120, skill: 70, plus: 60, orb: 100, merge: 300, mergeBonus: 300 };
 
 const RECIPES: Record<Sfx, (c: AudioContext, t: number) => void> = {
   plus: (c, t) => { tone(c, N(7), t, 0.1, 'triangle', 0.18); tone(c, N(14), t + 0.07, 0.16, 'triangle', 0.18); },
@@ -101,6 +101,9 @@ const RECIPES: Record<Sfx, (c: AudioContext, t: number) => void> = {
   boss: (c, t) => { tone(c, N(-24), t, 0.9, 'sawtooth', 0.15, N(-26)); tone(c, N(-17), t + 0.45, 0.9, 'sawtooth', 0.13, N(-19)); },
   orb: (c, t) => { [12, 16, 19, 24].forEach((s, i) => tone(c, N(s), t + i * 0.045, 0.14, 'sine', 0.15)); },
   skill: (c, t) => { tone(c, 600, t, 0.14, 'square', 0.08, 1500); },
+  // 키워드 합성(4.44): 두 소리가 모여 하나로 울리는 소리. 보너스는 반짝이는 높은 음이 이어진다
+  merge: (c, t) => { tone(c, N(0), t, 0.22, 'triangle', 0.15, N(7)); tone(c, N(12), t, 0.22, 'triangle', 0.12, N(7)); tone(c, N(7), t + 0.2, 0.3, 'sine', 0.18); tone(c, N(19), t + 0.22, 0.28, 'triangle', 0.1); },
+  mergeBonus: (c, t) => { RECIPES.merge(c, t); [12, 16, 19, 24, 28].forEach((s, i) => tone(c, N(s + 7), t + 0.35 + i * 0.07, 0.3, 'sine', 0.14)); noise(c, t + 0.35, 0.4, 0.05, 3000, 9000); },
   combo: (c, t) => { tone(c, N(12), t, 0.08, 'square', 0.1); tone(c, N(19), t + 0.06, 0.12, 'square', 0.1); },
 };
 

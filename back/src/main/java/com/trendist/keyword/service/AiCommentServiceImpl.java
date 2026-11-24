@@ -160,7 +160,7 @@ public class AiCommentServiceImpl implements AiCommentService {
     public void request(long userId, long keywordId) {
         Player p = playerService.requireCurrent(userId);
         Keyword k = keywords.findById(keywordId)
-                .filter(x -> x.getCountry().getId().equals(p.getCountry().getId()) && !x.getKeywordState().getId().equals(codes.keywordStateId(CodeTables.KW_BANNED)))
+                .filter(x -> !x.isMerged() && x.getCountry().getId().equals(p.getCountry().getId()) && !x.getKeywordState().getId().equals(codes.keywordStateId(CodeTables.KW_BANNED)))
                 .orElseThrow(() -> ApiException.notFound("KEYWORD_NOT_FOUND", "키워드를 찾을 수 없어요"));
         if (k.getAiComment() == null || k.getAiComment().getComment() == null) throw ApiException.conflict("AI_COMMENT_NONE", "아직 AI 설명이 없어요");
         if (requests.existsByKeywordIdAndPlayerIdAndHandledAtIsNull(keywordId, p.getId())) return; // 이미 접수됨

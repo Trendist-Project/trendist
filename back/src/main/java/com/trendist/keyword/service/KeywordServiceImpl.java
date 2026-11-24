@@ -8,14 +8,17 @@ import com.trendist.game.event.GameEvents;
 import com.trendist.keyword.dto.KeywordDtos;
 import com.trendist.keyword.entity.DataSource;
 import com.trendist.keyword.entity.Keyword;
+import com.trendist.keyword.entity.KeywordMergePart;
 import com.trendist.keyword.entity.KeywordState;
 import com.trendist.keyword.entity.PlayerKeyword;
+import com.trendist.keyword.repository.KeywordMergePartRepository;
 import com.trendist.keyword.repository.KeywordRepository;
 import com.trendist.keyword.repository.PlayerKeywordRepository;
 import com.trendist.keyword.source.ExternalTrendSource;
 import com.trendist.keyword.support.ActivePopulation;
 import com.trendist.keyword.support.BannedWordFilter;
 import com.trendist.keyword.support.KeywordNormalizer;
+import com.trendist.keyword.support.MergeKey;
 import com.trendist.keyword.support.SearchCounter;
 import com.trendist.keyword.support.TrendFormula;
 import com.trendist.player.entity.Player;
@@ -51,6 +54,7 @@ public class KeywordServiceImpl implements KeywordService {
     private final BannedWordFilter bannedWords;
     private final KeywordAiRequestRepository aiRequests;
     private final PlayerKeywordRepository playerKeywords;
+    private final KeywordMergePartRepository mergeParts;
     private final PlayerRepository players;
     private final PlayerService playerService;
     private final TrendFormula formula;
@@ -125,6 +129,7 @@ public class KeywordServiceImpl implements KeywordService {
 
         Optional<PlayerKeyword> existing = playerKeywords.findByPlayerIdAndKeywordId(p.getId(), k.getId());
         if (existing.isPresent() && !existing.get().isExpired(now)) throw ApiException.conflict("ALREADY_PLUSED", "이미 보유중인 키워드예요");
+        if (covering(p.getId(), k.getId(), now).isPresent()) throw ApiException.conflict("ALREADY_PLUSED", "이미 보유중인 키워드예요"); // 합성 키워드로 가진 원본(4.44)
         activity.add(country.getId(), com.trendist.stats.support.ActivityCounter.Kind.PLUS); // 사이트 통계(13.9)
         return addHolding(p, k, existing, now);
     }
@@ -169,7 +174,8 @@ public class KeywordServiceImpl implements KeywordService {
 
     /** 이미 가진 키워드의 만료 시각만 지금부터 다시 `plus_ttl_hours`(기본 24시간)로 늘린다. 점수·EXP는 그대로(4.3, 4.20, 4.21). 새 만료 시각을 돌려준다 */
     private Instant renewHolding(PlayerKeyword pk, Instant now) {
-        Instant expires = now.plus(Duration.ofHours(settings.getInt(SettingKeys.PLUS_TTL_HOURS)));
+        int hours = pk.getKeyword().isMerged() ? settings.getInt(SettingKeys.MERGE_EXPIRE_HOURS) : settings.getInt(SettingKeys.PLUS_TTL_HOURS);
+        Instant expires = now.plus(Duration.ofHours(hours));
         pk.renew(now, expires);
         playerKeywords.flush();
         return expires;
@@ -211,38 +217,35 @@ public class KeywordServiceImpl implements KeywordService {
         List<Long> ids = keywords.findIdsByCountryAndState(p.getCountry().getId(), codes.keywordStateId(CodeTables.KW_ACTIVE));
         if (prize && ids.size() > 1) {
             // 꽝 없이 "얻는" 구슬이므로, 가능하면 내 보관함에 없는 키워드에서 고른다(이미 가진 키워드면 시간만 갱신돼 얻은 느낌이 없다)
-            Set<Long> held = new HashSet<>(activeKeywordIds(p.getId()));
+            Set<Long> held = heldCoveredIds(p.getId(), Instant.now(clock)); // 합성으로 가진 원본도 가진 것(4.44)
             List<Long> fresh = ids.stream().filter(id -> !held.contains(id)).toList();
             if (!fresh.isEmpty()) ids = fresh;
         }
         if (ids.isEmpty()) return new KeywordDtos.OrbResult("NONE", null, null, null, 0, null, null);
         Keyword k = keywords.findByIdForUpdate(ids.get(ThreadLocalRandom.current().nextInt(ids.size()))).orElseThrow();
         Optional<PlayerKeyword> existing = playerKeywords.findByPlayerIdAndKeywordId(p.getId(), k.getId());
-        if (existing.isPresent() && !existing.get().isExpired(now)) {
+        Optional<PlayerKeyword> holding = covering(p.getId(), k.getId(), now); // 합성 키워드로 가진 것도 이미 가진 것(4.44)
+        if (holding.isPresent()) {
             // 이미 보관함에 있는 키워드가 나오면 남은 시간만 지금부터 다시 24시간(사람에게서 빼앗을 때(4.3)와 같게). 점수·EXP는 그대로
             return new KeywordDtos.OrbResult("RENEWED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
-                    k.getHolderCount(), 0L, renewHolding(existing.get(), now));
+                    k.getHolderCount(), 0L, renewHolding(holding.get(), now));
         }
         KeywordDtos.PlusResult r = addHolding(p, k, existing, now);
         return new KeywordDtos.OrbResult("GAINED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
                 k.getHolderCount(), r.gained(), r.keyword().myExpiresAt());
     }
 
-    /** 구슬에서 잃기(4.20): 가진 키워드(🔥·💤 가리지 않고, 금지 제외) 중 하나를 무작위로 지운다. 잃을 것이 없으면 꽝. 충돌 기록(잃은 횟수·통계)은 올리지 않는다 */
+    /**
+     * 구슬에서 잃기(4.20): 가진 키워드(🔥·💤 가리지 않고, 금지 제외)를 **구성 원본 단위**로 하나 무작위로 잃는다(합성 키워드면 원본 하나만 빠진다, 4.44).
+     * 잃을 것이 없으면 꽝. 충돌 기록(잃은 횟수·통계)은 올리지 않는다
+     */
     private KeywordDtos.OrbResult loseFromOrb(Player p) {
         Instant now = Instant.now(clock);
-        List<PlayerKeyword> candidates = playerKeywords.findLosableByPlayer(p.getId(), now, codes.keywordStateId(CodeTables.KW_BANNED));
-        if (candidates.isEmpty()) return new KeywordDtos.OrbResult("MISS", null, null, null, 0, null, null);
-        PlayerKeyword pk = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
-        Long keywordId = pk.getKeyword().getId();
-        String text = pk.getKeyword().getText();
-        String state = pk.getKeyword().getKeywordState().getName();
-        long score = isState(pk.getKeyword(), CodeTables.KW_ACTIVE) ? pk.getKeyword().getTrendValue() : 0; // 💤는 점수에 더해 주지 않았다
-        playerKeywords.delete(pk);
-        playerKeywords.flush();
-        removeHolding(p, keywordId, now);
-        Keyword k = keywords.findById(keywordId).orElseThrow();
-        return new KeywordDtos.OrbResult("LOST", text, state, k.getTrendValue(), k.getHolderCount(), score, null);
+        Optional<Loss> lost = loseOneOriginal(p, now, false);
+        if (lost.isEmpty()) return new KeywordDtos.OrbResult("MISS", null, null, null, 0, null, null);
+        Loss l = lost.get();
+        Keyword k = keywords.findById(l.keywordId()).orElseThrow();
+        return new KeywordDtos.OrbResult("LOST", l.text(), l.state(), k.getTrendValue(), k.getHolderCount(), l.lostPoints(), null);
     }
 
     @Override
@@ -277,10 +280,11 @@ public class KeywordServiceImpl implements KeywordService {
         Long pick = botKeywordId != null && ids.contains(botKeywordId) ? botKeywordId : ids.get(ThreadLocalRandom.current().nextInt(ids.size()));
         Keyword k = keywords.findByIdForUpdate(pick).orElseThrow();
         Optional<PlayerKeyword> existing = playerKeywords.findByPlayerIdAndKeywordId(p.getId(), k.getId()); // 만료됐지만 아직 안 지운 행일 수도 있다
-        if (existing.isPresent() && !existing.get().isExpired(now)) {
+        Optional<PlayerKeyword> holding = covering(p.getId(), k.getId(), now); // 합성 키워드로 가진 것도 이미 가진 것(4.44)
+        if (holding.isPresent()) {
             // 이미 가진 키워드: 사람에게서 빼앗을 때와 같이 남은 시간만 지금부터 다시 24시간(4.3)
             return new KeywordDtos.OrbResult("RENEWED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
-                    k.getHolderCount(), 0L, renewHolding(existing.get(), now));
+                    k.getHolderCount(), 0L, renewHolding(holding.get(), now));
         }
         KeywordDtos.PlusResult r = addHolding(p, k, existing, now);
         return new KeywordDtos.OrbResult("GAINED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
@@ -492,6 +496,7 @@ public class KeywordServiceImpl implements KeywordService {
         // 내부 데이터만으로는 가진 사람이 3명 이상이어야 🔥(4.7)
         if (isState(k, CodeTables.KW_ACTIVE) && k.getHolderCount() < settings.getInt(SettingKeys.ACTIVATE_HOLDERS)) {
             k.deactivate(codes.keywordState(CodeTables.KW_INACTIVE), now);
+            events.publishEvent(new com.trendist.keyword.support.KeywordPageEvents.Deactivated(k.getId())); // 합성 키워드에서 빼낸다(4.44)
         }
         long nw = updateTrend(k);
         publishTrendChange(k, old, nw, null);
@@ -510,12 +515,9 @@ public class KeywordServiceImpl implements KeywordService {
     @Transactional(readOnly = true)
     public List<KeywordDtos.MyKeyword> myKeywordsOfPlayer(long playerId) {
         Instant now = Instant.now(clock);
-        return playerKeywords.findActiveByPlayer(playerId, now, codes.keywordStateId(CodeTables.KW_BANNED)).stream()
-                .map(pk -> {
-                    Keyword k = pk.getKeyword();
-                    return new KeywordDtos.MyKeyword(k.getId(), k.getText(), k.getKeywordState().getName(),
-                            k.getTrendValue(), pk.getCreatedAt(), pk.getExpiresAt());
-                }).toList();
+        List<PlayerKeyword> rows = playerKeywords.findActiveByPlayer(playerId, now, codes.keywordStateId(CodeTables.KW_BANNED));
+        Map<Long, List<KeywordDtos.MergedPart>> partsOf = mergedPartsOf(rows.stream().map(pk -> pk.getKeyword()).filter(Keyword::isMerged).map(Keyword::getId).toList());
+        return rows.stream().map(pk -> myKeyword(pk, partsOf)).toList();
     }
 
     @Override
@@ -541,28 +543,19 @@ public class KeywordServiceImpl implements KeywordService {
         return true;
     }
 
-    /** 충돌로 잃기(4.3): 금지되지 않은 키워드 중 하나를 무작위로 지운다. 잃은 키워드 표시명을 돌려준다. */
+    /**
+     * 충돌로 잃기(4.3): 금지되지 않은 키워드를 **구성 원본 단위**로 하나 무작위로 잃는다. 합성 키워드(4.44)에서는 원본 하나만 빠지고 성이 낮아진다.
+     * 잃은 원본의 이름과, 내 유행도가 실제로 줄어든 점수를 돌려준다.
+     */
     @Override
     @Transactional
     public Optional<LostKeyword> loseRandom(long playerId) {
         Player p = players.findByIdForUpdate(playerId).orElse(null);
         if (p == null || p.getHoldCount() == 0) return Optional.empty();
-        Instant now = Instant.now(clock);
-        List<PlayerKeyword> candidates = playerKeywords.findLosableByPlayer(playerId, now, codes.keywordStateId(CodeTables.KW_BANNED));
-        if (candidates.isEmpty()) return Optional.empty();
-        PlayerKeyword pk = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
-        String text = pk.getKeyword().getText();
-        Long keywordId = pk.getKeyword().getId();
-        // 잃는 순간 이 키워드가 내 유행도에 더해 주던 점수(🔥만, 💤는 0)
-        long score = isState(pk.getKeyword(), CodeTables.KW_ACTIVE) ? pk.getKeyword().getTrendValue() : 0;
-        playerKeywords.delete(pk);
-        playerKeywords.flush();
-        activity.add(p.getCountry().getId(), com.trendist.stats.support.ActivityCounter.Kind.COLLISION); // 사이트 통계(13.9)
-        p.incLose(); // 칭호(4.10). removeHolding이 재합산하며 칭호를 검사한다
-        removeHolding(p, keywordId, now);
-        return Optional.of(new LostKeyword(keywordId, text, score));
+        return loseOneOriginal(p, Instant.now(clock), true).map(l -> new LostKeyword(l.keywordId(), l.text(), l.lostPoints()));
     }
 
+    /** 모두 잃기(4.25): 개수는 구성 원본 단위로 센다(일반 키워드 1개는 1, N성 합성 키워드는 N개, 4.44). */
     @Override
     @Transactional
     public Optional<LostAll> loseAll(long playerId) {
@@ -572,20 +565,34 @@ public class KeywordServiceImpl implements KeywordService {
         List<PlayerKeyword> candidates = playerKeywords.findLosableByPlayer(playerId, now, codes.keywordStateId(CodeTables.KW_BANNED));
         if (candidates.isEmpty()) return Optional.empty();
         long score = 0;
-        int activeCount = 0;
+        int count = 0, activeCount = 0;
         List<Long> keywordIds = new ArrayList<>();
         for (PlayerKeyword pk : candidates) {
-            if (isState(pk.getKeyword(), CodeTables.KW_ACTIVE)) { score += pk.getKeyword().getTrendValue(); activeCount++; } // 💤는 점수에 더해 주지 않았다
-            keywordIds.add(pk.getKeyword().getId());
+            Keyword k = pk.getKeyword();
+            if (k.isMerged()) {
+                score += k.getTrendValue(); // 합성 점수
+                for (Keyword part : keywords.findAllById(mergeParts.findPartIds(k.getId()))) {
+                    count++;
+                    if (isState(part, CodeTables.KW_ACTIVE)) activeCount++;
+                }
+            } else {
+                count++;
+                if (isState(k, CodeTables.KW_ACTIVE)) { score += k.getTrendValue(); activeCount++; } // 💤는 점수에 더해 주지 않았다
+            }
+            keywordIds.add(k.getId());
         }
         playerKeywords.deleteAll(candidates);
         playerKeywords.flush();
         p.incLose(); // 칭호(4.10): 한 번 부딪혀 잃은 것이므로 한 번으로 센다
         activity.add(p.getCountry().getId(), com.trendist.stats.support.ActivityCounter.Kind.COLLISION); // 사이트 통계(13.9)
         for (Long keywordId : keywordIds) removeHolding(p, keywordId, now); // 인원·트렌드 값·점수를 키워드마다 고친다
-        return Optional.of(new LostAll(keywordIds.size(), activeCount, score));
+        return Optional.of(new LostAll(count, activeCount, score));
     }
 
+    /**
+     * 일부 잃기(죽음·불꽃에 부딪힘, 4.25·4.36): 가진 키워드를 **구성 원본 단위**로 세어(일반 1개 = 1, N성 합성 = N개, 4.44) max(1, 원본 수 × percent%의 내림)개를
+     * 무작위로 잃는다. 합성 키워드에서는 뽑힌 원본만 빠지고 성이 낮아지며(남은 시간 유지), 원본이 모두 뽑히면 합성 키워드가 사라진다.
+     */
     @Override
     @Transactional
     public Optional<LostAll> loseFraction(long playerId, int percent) {
@@ -593,24 +600,41 @@ public class KeywordServiceImpl implements KeywordService {
         Player p = players.findByIdForUpdate(playerId).orElse(null);
         if (p == null || p.getHoldCount() == 0 || percent <= 0) return Optional.empty();
         Instant now = Instant.now(clock);
-        List<PlayerKeyword> candidates = new ArrayList<>(playerKeywords.findLosableByPlayer(playerId, now, codes.keywordStateId(CodeTables.KW_BANNED)));
+        List<PlayerKeyword> candidates = playerKeywords.findLosableByPlayer(playerId, now, codes.keywordStateId(CodeTables.KW_BANNED));
         if (candidates.isEmpty()) return Optional.empty();
-        int count = Math.max(1, candidates.size() * percent / 100); // 내림, 최소 1개(정수 계산이라 소수점이 생기지 않는다)
-        java.util.Collections.shuffle(candidates, ThreadLocalRandom.current());
-        List<PlayerKeyword> lost = candidates.subList(0, Math.min(count, candidates.size()));
-        long score = 0;
-        int activeCount = 0;
-        List<Long> keywordIds = new ArrayList<>();
-        for (PlayerKeyword pk : lost) {
-            if (isState(pk.getKeyword(), CodeTables.KW_ACTIVE)) { score += pk.getKeyword().getTrendValue(); activeCount++; }
-            keywordIds.add(pk.getKeyword().getId());
+        List<Long> originals = new ArrayList<>();
+        for (PlayerKeyword pk : candidates) {
+            if (pk.getKeyword().isMerged()) originals.addAll(mergeParts.findPartIds(pk.getKeyword().getId()));
+            else originals.add(pk.getKeyword().getId());
         }
-        playerKeywords.deleteAll(lost);
-        playerKeywords.flush();
+        int count = Math.max(1, originals.size() * percent / 100); // 내림, 최소 1개(정수 계산이라 소수점이 생기지 않는다)
+        java.util.Collections.shuffle(originals, ThreadLocalRandom.current());
+        List<Long> lost = originals.subList(0, Math.min(count, originals.size()));
         p.incLose(); // 칭호(4.10): 한 번 부딪혀 잃은 것이므로 한 번으로 센다
         activity.add(p.getCountry().getId(), com.trendist.stats.support.ActivityCounter.Kind.COLLISION);
-        for (Long keywordId : keywordIds) removeHolding(p, keywordId, now);
-        return Optional.of(new LostAll(keywordIds.size(), activeCount, score));
+        long score = 0;
+        int activeCount = 0;
+        for (Long id : lost) {
+            Keyword original = keywords.findById(id).orElse(null);
+            if (original == null) continue;
+            if (isState(original, CodeTables.KW_ACTIVE)) activeCount++;
+            score += loseOriginal(p, id, now);
+        }
+        return Optional.of(new LostAll(lost.size(), activeCount, score));
+    }
+
+    /** 구성 원본 하나를 잃는다: 일반 키워드면 그 행을 지우고, 합성 키워드 안에 있으면 그 원본만 뺀다. 내 유행도가 실제로 줄어든 점수를 돌려준다. */
+    private long loseOriginal(Player p, Long keywordId, Instant now) {
+        Optional<PlayerKeyword> row = covering(p.getId(), keywordId, now);
+        if (row.isEmpty()) return 0;
+        PlayerKeyword pk = row.get();
+        Keyword k = pk.getKeyword();
+        if (k.isMerged()) return dropPartFromHolding(p, pk, keywordId, now);
+        long points = isState(k, CodeTables.KW_ACTIVE) ? k.getTrendValue() : 0;
+        playerKeywords.delete(pk);
+        playerKeywords.flush();
+        removeHolding(p, keywordId, now);
+        return points;
     }
 
     @Override
@@ -623,28 +647,22 @@ public class KeywordServiceImpl implements KeywordService {
         Player loser = first.getId() == loserId ? first : second, winner = loser == first ? second : first;
         if (loser.getHoldCount() == 0 || !loser.getCountry().getId().equals(winner.getCountry().getId())) return Optional.empty();
         Instant now = Instant.now(clock);
-        List<PlayerKeyword> candidates = playerKeywords.findLosableByPlayer(loserId, now, codes.keywordStateId(CodeTables.KW_BANNED));
-        if (candidates.isEmpty()) return Optional.empty();
-        PlayerKeyword pk = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
-        String text = pk.getKeyword().getText();
-        Long keywordId = pk.getKeyword().getId();
-        long score = isState(pk.getKeyword(), CodeTables.KW_ACTIVE) ? pk.getKeyword().getTrendValue() : 0;
-        playerKeywords.delete(pk);
-        playerKeywords.flush();
-        loser.incLose(); // 칭호(4.10)
-        activity.add(loser.getCountry().getId(), com.trendist.stats.support.ActivityCounter.Kind.COLLISION); // 사이트 통계(13.9)
+        // 구성 원본 단위로 하나를 잃는다(합성 키워드면 원본 하나만 빠지고 성이 낮아진다, 4.44). 이긴 쪽은 그 원본을 일반 키워드로 빼앗는다
+        Optional<Loss> lost = loseOneOriginal(loser, now, true);
+        if (lost.isEmpty()) return Optional.empty();
+        Loss l = lost.get();
         playerService.awardAttack(winner); // 빼앗은 횟수 +1과 공격 성공 EXP(4.3). 점수·레벨을 다시 정하고 칭호를 확인한다
-        removeHolding(loser, keywordId, now);
 
-        Keyword k = keywords.findByIdForUpdate(keywordId).orElseThrow();
-        Optional<PlayerKeyword> existing = playerKeywords.findByPlayerIdAndKeywordId(winnerId, keywordId);
-        if (existing.isPresent() && !existing.get().isExpired(now)) {
+        Keyword k = keywords.findByIdForUpdate(l.keywordId()).orElseThrow();
+        Optional<PlayerKeyword> holding = covering(winnerId, l.keywordId(), now); // 합성 키워드로 가진 것도 이미 가진 것(4.44)
+        if (holding.isPresent()) {
             // 이미 가진 키워드: 남은 시간만 지금부터 다시 24시간. 점수·EXP는 그대로
-            return Optional.of(new StolenKeyword(text, score, "RENEWED", 0, renewHolding(existing.get(), now)));
+            return Optional.of(new StolenKeyword(l.text(), l.score(), "RENEWED", 0, renewHolding(holding.get(), now)));
         }
         // 없던 키워드: 일반 추가와 같이 보관함에 넣는다(24시간, EXP +1, 가진 사람 수 +1, 점수 반영). 구슬(4.20)과 같은 방식
+        Optional<PlayerKeyword> existing = playerKeywords.findByPlayerIdAndKeywordId(winnerId, l.keywordId());
         KeywordDtos.PlusResult r = addHolding(winner, k, existing, now);
-        return Optional.of(new StolenKeyword(text, score, "ADDED", r.gained(), r.keyword().myExpiresAt()));
+        return Optional.of(new StolenKeyword(l.text(), l.score(), "ADDED", r.gained(), r.keyword().myExpiresAt()));
     }
 
     /**
@@ -677,10 +695,92 @@ public class KeywordServiceImpl implements KeywordService {
                 log.warn("purge banned holding {} failed", id, ex);
             }
         }
+        return removed + purgeBannedMerged(fresh, countryCode, normalized);
+    }
+
+    /**
+     * 합성 키워드(4.44)의 금지 정리: ① 구성 원본이 금지된 것이면(금지어가 들어 있는 원본 포함) 그 원본만 빠지고 성이 낮아진다(남은 시간 유지).
+     * ② 이어 붙인 글자가 금지어를 품은 합성 키워드는 보관함에서 통째로 지운다.
+     */
+    private int purgeBannedMerged(TransactionTemplate fresh, String countryCode, String normalized) {
+        boolean contain = normalized.length() >= BannedWordFilter.MIN_WORD_LENGTH;
+        int removed = 0;
+        for (int round = 0; round < 20; round++) { // 한 행에 금지된 원본이 여럿이면 한 번에 하나씩 빠지므로 없을 때까지 되풀이한다
+            List<Object[]> rows = fresh.execute(st -> playerKeywords.findMergedRowsWithBannedPart(countryCode, normalized, contain));
+            int done = 0;
+            for (Object[] r : rows == null ? List.<Object[]>of() : rows) {
+                long rowId = ((Number) r[0]).longValue(), partId = ((Number) r[1]).longValue();
+                try {
+                    Boolean ok = fresh.execute(st -> {
+                        PlayerKeyword pk = playerKeywords.findById(rowId).orElse(null);
+                        if (pk == null || !pk.getKeyword().isMerged()) return false;
+                        Player p = players.findByIdForUpdate(pk.getPlayer().getId()).orElseThrow();
+                        return dropPartFromHolding(p, pk, partId, Instant.now(clock)) >= 0;
+                    });
+                    if (Boolean.TRUE.equals(ok)) done++;
+                } catch (RuntimeException ex) {
+                    log.warn("purge banned merged part {} failed", rowId, ex);
+                }
+            }
+            removed += done;
+            if (done == 0) break;
+        }
+        List<Long> ids = fresh.execute(st -> playerKeywords.findMergedRowIdsByCountry(countryCode));
+        for (Long id : ids == null ? List.<Long>of() : ids) {
+            try {
+                Boolean ok = fresh.execute(st -> {
+                    PlayerKeyword pk = playerKeywords.findById(id).orElse(null);
+                    if (pk == null) return false;
+                    String joined = KeywordNormalizer.normalize(pk.getKeyword().getText());
+                    if (contain ? !joined.contains(normalized) : !joined.equals(normalized)) return false;
+                    Player p = players.findByIdForUpdate(pk.getPlayer().getId()).orElseThrow();
+                    Long keywordId = pk.getKeyword().getId();
+                    playerKeywords.delete(pk);
+                    playerKeywords.flush();
+                    removeHolding(p, keywordId, Instant.now(clock));
+                    return true;
+                });
+                if (Boolean.TRUE.equals(ok)) removed++;
+            } catch (RuntimeException ex) {
+                log.warn("purge banned merged text {} failed", id, ex);
+            }
+        }
         return removed;
     }
 
+    /**
+     * 일반 키워드가 💤비활성이 되면(4.44) 그 원본이 든 모든 합성 키워드에서 그 원본을 뺀다(성이 낮아지고 남은 시간은 유지).
+     * 비활성이 되는 키워드는 가진 사람(합성 보유자 포함)이 활성 전환 인원(기본 3명) 미만이라 대상은 몇 행뿐이다.
+     * 전환이 일어난 트랜잭션에서는 원본 키워드를 잠근 채라 다른 플레이어를 잠그면 잠금 순서(플레이어 → 키워드)가 거꾸로 되므로,
+     * 커밋 뒤에 행마다 새 트랜잭션으로 한다. 다시 🔥가 돼도 빠진 원본은 돌아오지 않는다.
+     */
+    @org.springframework.transaction.event.TransactionalEventListener
+    public void onDeactivated(com.trendist.keyword.support.KeywordPageEvents.Deactivated e) { splitInactivePart(e.keywordId()); }
+
+    int splitInactivePart(long partId) {
+        TransactionTemplate fresh = new TransactionTemplate(tx.getTransactionManager());
+        fresh.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        List<Long> ids = fresh.execute(st -> playerKeywords.findMergedRowIdsWithPart(partId, Instant.now(clock)));
+        int split = 0;
+        for (Long id : ids == null ? List.<Long>of() : ids) {
+            try {
+                Boolean ok = fresh.execute(st -> {
+                    PlayerKeyword pk = playerKeywords.findById(id).orElse(null);
+                    Keyword part = keywords.findById(partId).orElse(null);
+                    if (pk == null || part == null || !pk.getKeyword().isMerged() || isState(part, CodeTables.KW_ACTIVE)) return false; // 그 사이 🔥로 돌아왔으면 그대로 둔다
+                    Player p = players.findByIdForUpdate(pk.getPlayer().getId()).orElseThrow(); // 잠금 순서: 플레이어 → 키워드
+                    return dropPartFromHolding(p, pk, partId, Instant.now(clock)) >= 0;
+                });
+                if (Boolean.TRUE.equals(ok)) split++;
+            } catch (RuntimeException ex) {
+                log.warn("split inactive part {} from holding {} failed", partId, id, ex);
+            }
+        }
+        return split;
+    }
+
     private void removeHolding(Player p, Long keywordId, Instant now) {
+        if (keywords.findById(keywordId).map(Keyword::isMerged).orElse(false)) { removeMergedHolding(p, keywordId); return; } // 합성 키워드(4.44)
         Keyword k = keywords.findByIdForUpdate(keywordId).orElseThrow();
         long oldTrend = k.getTrendValue();
         k.decHolder();
@@ -689,6 +789,7 @@ public class KeywordServiceImpl implements KeywordService {
         if (isState(k, CodeTables.KW_ACTIVE) && k.getDataSource().isInternal()
                 && k.getHolderCount() < settings.getInt(SettingKeys.ACTIVATE_HOLDERS)) {
             k.deactivate(codes.keywordState(CodeTables.KW_INACTIVE), now);
+            events.publishEvent(new com.trendist.keyword.support.KeywordPageEvents.Deactivated(k.getId())); // 합성 키워드에서 빼낸다(4.44)
         }
         long newTrend = updateTrend(k);
         keywords.flush();
@@ -702,21 +803,27 @@ public class KeywordServiceImpl implements KeywordService {
         population.refresh();
         Long activeId = codes.keywordStateId(CodeTables.KW_ACTIVE);
         int changed = 0;
-        for (Keyword k : keywords.findAllByStateWithSource(activeId)) {
-            long v = formula.trendValue(true, k.getHolderCount(), k.getDataSource().getWeight().doubleValue(),
-                    population.get(k.getCountry().getId()));
-            if (v == k.getTrendValue()) continue;
-            try {
-                // 그 사이 +·삭제로 바뀌었을 수 있으니 행을 잠그고 다시 계산한다. 키워드 행만 잠그므로 플레이어 → 키워드 잠금 순서와 부딪히지 않는다
-                Boolean r = tx.execute(st -> keywords.findByIdForUpdate(k.getId()).map(locked -> {
-                    long old = locked.getTrendValue();
-                    long nw = updateTrend(locked);
-                    publishTrendChange(locked, old, nw, null);
-                    return old != nw;
-                }).orElse(false));
-                if (Boolean.TRUE.equals(r)) changed++;
-            } catch (RuntimeException e) {
-                log.warn("trend refresh {} failed", k.getId(), e);
+        List<Keyword> all = keywords.findAllByStateWithSource(activeId);
+        // 일반 키워드를 먼저, 합성 키워드(4.44)는 구성 원본의 값을 따라가므로 그다음에 다시 구한다
+        for (int pass = 0; pass < 2; pass++) {
+            for (Keyword k : all) {
+                if (k.isMerged() != (pass == 1)) continue;
+                long v = k.isMerged() ? mergedTrend(k)
+                        : formula.trendValue(true, k.getHolderCount(), k.getDataSource().getWeight().doubleValue(),
+                                population.get(k.getCountry().getId()), normalizedLength(k));
+                if (v == k.getTrendValue()) continue;
+                try {
+                    // 그 사이 +·삭제로 바뀌었을 수 있으니 행을 잠그고 다시 계산한다. 키워드 행만 잠그므로 플레이어 → 키워드 잠금 순서와 부딪히지 않는다
+                    Boolean r = tx.execute(st -> keywords.findByIdForUpdate(k.getId()).map(locked -> {
+                        long old = locked.getTrendValue();
+                        long nw = updateTrend(locked);
+                        publishTrendChange(locked, old, nw, null);
+                        return old != nw;
+                    }).orElse(false));
+                    if (Boolean.TRUE.equals(r)) changed++;
+                } catch (RuntimeException e) {
+                    log.warn("trend refresh {} failed", k.getId(), e);
+                }
             }
         }
         return changed;
@@ -734,6 +841,374 @@ public class KeywordServiceImpl implements KeywordService {
     @Transactional(readOnly = true)
     public List<Long> holderPlayerIds(long keywordId) {
         return playerKeywords.findHolderPlayerIds(keywordId, Instant.now(clock));
+    }
+
+    // ---------------------------------------------------------------- 합성(4.44)
+
+    private static final int MAX_BONUS_TRIES = 30;
+
+    /** 합성 한 번의 계획: 검증을 마친 재료 두 행과, 이어 붙인(정렬한) 구성 원본·이름. */
+    private record MergePlan(PlayerKeyword rowA, PlayerKeyword rowB, List<Keyword> parts, String text) {}
+
+    private PlayerKeyword heldRow(Player p, long keywordId, Instant now) {
+        return playerKeywords.findByPlayerIdAndKeywordId(p.getId(), keywordId).filter(pk -> !pk.isExpired(now))
+                .orElseThrow(() -> ApiException.notFound("NOT_HELD", "보관함에 없는 키워드예요"));
+    }
+
+    /** 합성할 수 있는지 검사하고 계획을 만든다. 합칠 수 없으면 이유를 담은 ApiException. */
+    private MergePlan planMerge(Player p, long firstId, long secondId, Instant now) {
+        if (settings.getInt(SettingKeys.MERGE_ENABLED) == 0) throw ApiException.badRequest("MERGE_DISABLED", "지금은 합성할 수 없어요");
+        if (firstId == secondId) throw ApiException.badRequest("MERGE_SAME", "서로 다른 키워드를 골라 주세요");
+        PlayerKeyword a = heldRow(p, firstId, now), b = heldRow(p, secondId, now);
+        Map<Long, Keyword> parts = new LinkedHashMap<>();
+        for (PlayerKeyword row : List.of(a, b)) {
+            Keyword k = row.getKeyword();
+            if (isBanned(k)) throw ApiException.badRequest("KEYWORD_BANNED", "합칠 수 없는 키워드예요");
+            // 🔥활성 키워드끼리만 합칠 수 있다(합성 키워드는 항상 🔥)
+            if (!k.isMerged() && !isState(k, CodeTables.KW_ACTIVE)) throw ApiException.badRequest("MERGE_NEEDS_ACTIVE", "활성 키워드만 합칠 수 있어요");
+            List<Keyword> ps = k.isMerged() ? keywords.findAllById(mergeParts.findPartIds(k.getId())) : List.of(k);
+            for (Keyword part : ps) {
+                if (parts.putIfAbsent(part.getId(), part) != null) throw ApiException.badRequest("MERGE_OVERLAP", "이미 들어 있는 키워드가 겹쳐요");
+            }
+        }
+        List<Keyword> sorted = MergeKey.sorted(parts.values());
+        String text = MergeKey.text(sorted);
+        int len = MergeKey.length(text);
+        if (len > MergeKey.MAX_TEXT_LENGTH) {
+            throw ApiException.badRequest("MERGE_TOO_LONG", (len - MergeKey.MAX_TEXT_LENGTH) + "자를 초과합니다 (최대 " + MergeKey.MAX_TEXT_LENGTH + "자)");
+        }
+        if (bannedWords.contains(p.getCountry().getCode(), MergeKey.joinedNormalized(sorted))) {
+            throw ApiException.badRequest("KEYWORD_BANNED", "합칠 수 없는 조합이에요");
+        }
+        return new MergePlan(a, b, sorted, text);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public KeywordDtos.MergePreview mergePreview(long userId, long firstId, long secondId) {
+        Player p = playerService.requireCurrent(userId);
+        Instant now = Instant.now(clock);
+        double mult = settings.getDouble(SettingKeys.MERGE_SCORE_MULTIPLIER);
+        int hours = settings.getInt(SettingKeys.MERGE_EXPIRE_HOURS);
+        try {
+            MergePlan plan = planMerge(p, firstId, secondId, now);
+            long sum = plan.parts().stream().mapToLong(Keyword::getTrendValue).sum();
+            int stars = plan.parts().size();
+            double pct = formula.mergeBonusPercent(stars);
+            boolean possible = pct > 0 && !bonusCandidates(p, plan.parts(), plan.text(), now).isEmpty();
+            return new KeywordDtos.MergePreview(true, null, MergeKey.display(plan.parts()), stars, sum, mult, formula.mergedValue(sum), hours,
+                    MergeKey.length(plan.text()), MergeKey.MAX_TEXT_LENGTH, pct, possible, partsDto(plan.parts()));
+        } catch (ApiException e) {
+            return new KeywordDtos.MergePreview(false, e.getMessage(), null, 0, 0, mult, 0, hours, 0, MergeKey.MAX_TEXT_LENGTH, 0, false, List.of());
+        }
+    }
+
+    @Override
+    @Transactional
+    public KeywordDtos.MergeResult merge(long userId, long firstId, long secondId) {
+        Player found = playerService.requireCurrent(userId);
+        Player p = players.findByIdForUpdate(found.getId()).orElseThrow(); // 잠금 순서: 플레이어 → 구성 원본(번호 순) → 합성 키워드(번호 순)
+        Instant now = Instant.now(clock);
+        MergePlan plan = planMerge(p, firstId, secondId, now);
+        Country country = p.getCountry();
+
+        // +1성 보너스(4.44): 결과 성이 높을수록 낮은 확률로, 글자 수가 허용되는 🔥활성 키워드 중 하나가 덤으로 붙는다
+        Keyword bonus = null;
+        double pct = formula.mergeBonusPercent(plan.parts().size());
+        if (pct > 0 && ThreadLocalRandom.current().nextDouble(100) < pct) bonus = pickBonus(p, plan, now);
+        List<Keyword> parts = new ArrayList<>(plan.parts());
+        if (bonus != null) parts.add(bonus);
+
+        long oldScore = p.getCurrentScore() - p.getLevel();
+        Map<Long, Keyword> lockedParts = new TreeMap<>();
+        for (Keyword k : parts) lockedParts.put(k.getId(), keywords.findByIdForUpdate(k.getId()).orElseThrow());
+        List<Keyword> sorted = MergeKey.sorted(lockedParts.values());
+        Keyword target = findOrCreateMerged(country, sorted, now);
+        // 합성 키워드 행 잠금(번호 순): 결과 합성 키워드와 재료였던 합성 키워드
+        TreeSet<Long> mergedIds = new TreeSet<>();
+        mergedIds.add(target.getId());
+        List<PlayerKeyword> rows = List.of(plan.rowA(), plan.rowB());
+        for (PlayerKeyword row : rows) if (row.getKeyword().isMerged()) mergedIds.add(row.getKeyword().getId());
+        Map<Long, Keyword> lockedMerged = new HashMap<>();
+        for (Long id : mergedIds) lockedMerged.put(id, keywords.findByIdForUpdate(id).orElseThrow());
+        target = lockedMerged.get(target.getId());
+
+        // 재료 둘을 지운다. 구성 원본의 가진 사람 수는 합성으로 가진 것도 세므로 그대로이고, 재료였던 합성 키워드는 그 행의 보유자만 줄인다
+        List<Long> removedIds = new ArrayList<>();
+        for (PlayerKeyword row : rows) {
+            Keyword k = row.getKeyword();
+            removedIds.add(k.getId());
+            if (k.isMerged()) lockedMerged.get(k.getId()).decHolder();
+            playerKeywords.delete(row);
+        }
+        playerKeywords.flush();
+        Instant expires = now.plus(Duration.ofHours(settings.getInt(SettingKeys.MERGE_EXPIRE_HOURS)));
+        Optional<PlayerKeyword> old = playerKeywords.findByPlayerIdAndKeywordId(p.getId(), target.getId()); // 만료됐지만 남은 행이 있으면 재사용
+        PlayerKeyword newRow;
+        if (old.isPresent()) { old.get().renew(now, expires); newRow = old.get(); }
+        else newRow = playerKeywords.save(new PlayerKeyword(p, target, now, expires));
+        target.incHolder();
+        if (bonus != null) {
+            // 덤으로 붙은 키워드도 가진 것으로 센다(가진 사람 수 +1, 보유 키워드 수 +1)
+            Keyword b = lockedParts.get(bonus.getId());
+            long oldTrend = b.getTrendValue();
+            b.incHolder();
+            p.incHold();
+            long nw = updateTrend(b);
+            keywords.flush();
+            publishTrendChange(b, oldTrend, nw, p.getId());
+        }
+        keywords.flush();
+        playerKeywords.flush();
+        long newScore = playerService.recompute(p);
+        for (Long id : removedIds) events.publishEvent(new GameEvents.HoldingChanged(country.getId(), p.getId(), id, false));
+        events.publishEvent(new GameEvents.HoldingChanged(country.getId(), p.getId(), target.getId(), true));
+        long gained = (newScore - p.getLevel()) - oldScore;
+        return new KeywordDtos.MergeResult(myKeyword(newRow), bonus != null,
+                bonus == null ? null : partDto(bonus), gained, playerService.summary(p));
+    }
+
+    /** +1성 보너스 후보(4.44): 같은 나라의 🔥활성 일반 키워드 중 이어 붙인 글자 수가 허용 범위 안이고 내가 (직접·합성으로) 갖고 있지 않은 것. */
+    private List<Long> bonusCandidates(Player p, List<Keyword> parts, String text, Instant now) {
+        Set<Long> covered = heldCoveredIds(p.getId(), now);
+        for (Keyword k : parts) covered.add(k.getId());
+        int used = MergeKey.length(text);
+        List<Long> out = new ArrayList<>();
+        for (Object[] r : keywords.findMergeBonusPool(p.getCountry().getId(), codes.keywordStateId(CodeTables.KW_ACTIVE))) {
+            long id = ((Number) r[0]).longValue();
+            if (covered.contains(id)) continue;
+            if (used + MergeKey.length((String) r[1]) > MergeKey.MAX_TEXT_LENGTH) continue;
+            out.add(id);
+        }
+        return out;
+    }
+
+    /** 후보 중 균등 무작위 하나(금지어가 생기는 후보는 건너뛴다). 없으면 null이라 보너스 없이 끝난다. */
+    private Keyword pickBonus(Player p, MergePlan plan, Instant now) {
+        List<Long> ids = new ArrayList<>(bonusCandidates(p, plan.parts(), plan.text(), now));
+        Collections.shuffle(ids, ThreadLocalRandom.current());
+        String countryCode = p.getCountry().getCode();
+        for (int i = 0; i < Math.min(MAX_BONUS_TRIES, ids.size()); i++) {
+            Keyword c = keywords.findById(ids.get(i)).orElse(null);
+            if (c == null || c.isMerged() || !isState(c, CodeTables.KW_ACTIVE)) continue;
+            List<Keyword> with = new ArrayList<>(plan.parts());
+            with.add(c);
+            if (bannedWords.contains(countryCode, MergeKey.joinedNormalized(MergeKey.sorted(with)))) continue;
+            return c;
+        }
+        return null;
+    }
+
+    /** 같은 구성의 합성 키워드를 찾고, 없으면 만든다(4.44). 합성 키워드의 상태는 항상 🔥활성, 반영 소스는 internal이다. */
+    private Keyword findOrCreateMerged(Country country, List<Keyword> sortedParts, Instant now) {
+        String key = MergeKey.identity(sortedParts);
+        Optional<Keyword> found = keywords.findByCountryIdAndNormalized(country.getId(), key);
+        if (found.isPresent()) return found.get();
+        Keyword m = Keyword.merged(country, codes.dataSource(DataSource.INTERNAL), codes.keywordState(CodeTables.KW_ACTIVE),
+                MergeKey.text(sortedParts), key, sortedParts.size(), now);
+        try {
+            m = keywords.saveAndFlush(m);
+        } catch (DataIntegrityViolationException e) {
+            throw ApiException.conflict("RETRY", "잠시 후 다시 시도해 주세요"); // 같은 합성을 동시에 만들었다
+        }
+        for (Keyword part : sortedParts) mergeParts.save(new KeywordMergePart(m.getId(), part.getId()));
+        mergeParts.flush();
+        updateTrend(m);
+        return m;
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public KeywordDtos.MergedDetail mergedDetail(long userId, long keywordId) {
+        Player p = playerService.requireCurrent(userId);
+        Keyword m = keywords.findById(keywordId)
+                .filter(x -> x.isMerged() && x.getCountry().getId().equals(p.getCountry().getId()))
+                .orElseThrow(() -> ApiException.notFound("KEYWORD_NOT_FOUND", "키워드를 찾을 수 없어요"));
+        Instant now = Instant.now(clock);
+        List<Keyword> parts = MergeKey.sorted(keywords.findAllWithAiByIds(mergeParts.findPartIds(m.getId())));
+        List<KeywordDtos.KeywordCard> cards = parts.stream().filter(k -> !isBanned(k)).map(k -> card(k, p, now)).toList(); // 합성 창을 연 것은 원본의 조회수에 세지 않는다
+        long sum = parts.stream().mapToLong(Keyword::getTrendValue).sum();
+        Instant mine = playerKeywords.findByPlayerIdAndKeywordId(p.getId(), m.getId()).filter(pk -> !pk.isExpired(now)).map(PlayerKeyword::getExpiresAt).orElse(null);
+        return new KeywordDtos.MergedDetail(m.getId(), MergeKey.display(parts), m.getStarCount(), m.getTrendValue(), sum,
+                settings.getDouble(SettingKeys.MERGE_SCORE_MULTIPLIER), mine, cards);
+    }
+
+    // ---- 보유 판정: 합성 키워드를 가지면 구성 원본을 가진 것(4.44)
+
+    /** 이 키워드를 가진 만료 전 보관함 행: 그 키워드 자체이거나 그 키워드가 구성 원본으로 든 합성 키워드. */
+    private Optional<PlayerKeyword> covering(long playerId, long keywordId, Instant now) {
+        return playerKeywords.findCovering(playerId, keywordId, now).stream().findFirst();
+    }
+
+    /** 내가 가진 것으로 치는 키워드 번호: 보관함 행의 키워드와, 합성 키워드의 구성 원본(만료 전, 금지 제외). 고쳐 써도 되는 집합. */
+    private Set<Long> heldCoveredIds(long playerId, Instant now) {
+        Set<Long> out = new HashSet<>();
+        for (PlayerKeyword pk : playerKeywords.findActiveByPlayer(playerId, now, codes.keywordStateId(CodeTables.KW_BANNED))) {
+            out.add(pk.getKeyword().getId());
+            if (pk.getKeyword().isMerged()) out.addAll(mergeParts.findPartIds(pk.getKeyword().getId()));
+        }
+        return out;
+    }
+
+    private KeywordDtos.MergedPart partDto(Keyword k) {
+        return new KeywordDtos.MergedPart(k.getId(), k.getText(), k.getKeywordState().getName(), k.getTrendValue());
+    }
+
+    private static String spaced(List<KeywordDtos.MergedPart> parts) {
+        return String.join(" + ", parts.stream().map(KeywordDtos.MergedPart::text).toList());
+    }
+
+    private List<KeywordDtos.MergedPart> partsDto(List<Keyword> sorted) { return sorted.stream().map(this::partDto).toList(); }
+
+    /** 합성 키워드 번호 → 구성 원본(이름 순서 규칙대로). */
+    private Map<Long, List<KeywordDtos.MergedPart>> mergedPartsOf(Collection<Long> mergedIds) {
+        Map<Long, List<KeywordDtos.MergedPart>> out = new HashMap<>();
+        if (mergedIds.isEmpty()) return out;
+        List<KeywordMergePart> links = mergeParts.findByKeywordIds(mergedIds);
+        Map<Long, Keyword> byId = new HashMap<>();
+        for (Keyword k : keywords.findAllById(links.stream().map(KeywordMergePart::getPartKeywordId).distinct().toList())) byId.put(k.getId(), k);
+        Map<Long, List<Keyword>> grouped = new HashMap<>();
+        for (KeywordMergePart l : links) {
+            Keyword part = byId.get(l.getPartKeywordId());
+            if (part != null) grouped.computeIfAbsent(l.getKeywordId(), x -> new ArrayList<>()).add(part);
+        }
+        grouped.forEach((id, list) -> out.put(id, partsDto(MergeKey.sorted(list))));
+        return out;
+    }
+
+    private KeywordDtos.MyKeyword myKeyword(PlayerKeyword pk) {
+        Keyword k = pk.getKeyword();
+        return myKeyword(pk, k.isMerged() ? mergedPartsOf(List.of(k.getId())) : Map.of());
+    }
+
+    private KeywordDtos.MyKeyword myKeyword(PlayerKeyword pk, Map<Long, List<KeywordDtos.MergedPart>> partsOf) {
+        Keyword k = pk.getKeyword();
+        List<KeywordDtos.MergedPart> parts = partsOf.getOrDefault(k.getId(), List.of());
+        String text = k.isMerged() && !parts.isEmpty() ? spaced(parts) : k.getText(); // 합성 키워드는 구성 원본을 띄어 써서 보여 준다
+        return new KeywordDtos.MyKeyword(k.getId(), text, k.getKeywordState().getName(), k.getTrendValue(),
+                pk.getCreatedAt(), pk.getExpiresAt(), k.isMerged(), k.getStarCount(), parts);
+    }
+
+    // ---- 잃기: 구성 원본 단위(4.3, 4.44)
+
+    /** 잃은 원본 하나: 번호·이름·상태, 그 원본 자신의 점수(빼앗는 쪽이 받는 값), 내 유행도가 실제로 줄어든 점수. */
+    private record Loss(Long keywordId, String text, String state, long score, long lostPoints) {}
+
+    /**
+     * 가진 키워드(금지 제외, 🔥·💤 무관)를 구성 원본 단위로 하나 무작위로 잃는다. 일반 키워드 1개는 1, N성 합성 키워드는 N개로 센다.
+     * 합성 키워드에서 원본이 뽑히면 그 원본만 빠지고 성이 하나 낮아진다(남은 시간 유지). 플레이어를 잠근 상태에서 부른다.
+     * collision이면 충돌로 잃은 것이라 잃은 횟수와 통계를 올린다.
+     */
+    private Optional<Loss> loseOneOriginal(Player p, Instant now, boolean collision) {
+        List<PlayerKeyword> candidates = playerKeywords.findLosableByPlayer(p.getId(), now, codes.keywordStateId(CodeTables.KW_BANNED));
+        if (candidates.isEmpty()) return Optional.empty();
+        int total = 0;
+        for (PlayerKeyword c : candidates) total += Math.max(1, c.getKeyword().getStarCount());
+        int r = ThreadLocalRandom.current().nextInt(total);
+        PlayerKeyword pk = candidates.get(0);
+        for (PlayerKeyword c : candidates) {
+            int w = Math.max(1, c.getKeyword().getStarCount());
+            if (r < w) { pk = c; break; }
+            r -= w;
+        }
+        Keyword k = pk.getKeyword();
+        if (collision) {
+            p.incLose(); // 칭호(4.10). recompute가 칭호를 검사한다
+            activity.add(p.getCountry().getId(), com.trendist.stats.support.ActivityCounter.Kind.COLLISION); // 사이트 통계(13.9)
+        }
+        if (!k.isMerged()) {
+            Long id = k.getId();
+            String text = k.getText(), state = k.getKeywordState().getName();
+            long score = isState(k, CodeTables.KW_ACTIVE) ? k.getTrendValue() : 0; // 💤는 점수에 더해 주지 않았다
+            playerKeywords.delete(pk);
+            playerKeywords.flush();
+            removeHolding(p, id, now);
+            return Optional.of(new Loss(id, text, state, score, score));
+        }
+        List<Long> partIds = mergeParts.findPartIds(k.getId());
+        Long partId = partIds.get(Math.min(r, partIds.size() - 1));
+        Keyword part = keywords.findById(partId).orElseThrow();
+        long partScore = isState(part, CodeTables.KW_ACTIVE) ? part.getTrendValue() : 0;
+        String text = part.getText(), state = part.getKeywordState().getName();
+        long lostPoints = dropPartFromHolding(p, pk, partId, now);
+        return Optional.of(new Loss(partId, text, state, partScore, lostPoints));
+    }
+
+    /**
+     * 합성 보관함 행에서 구성 원본 하나를 뺀다(4.44): 성이 하나 낮아지고 남은 시간은 그대로다. 남은 구성이 둘 이상이면 그 구성의 합성 키워드로,
+     * 하나면 그 원본 키워드(일반)로 바뀐다. 빠진 원본은 이 플레이어가 더는 가진 것이 아니라 가진 사람 수가 줄고 보유 키워드 수도 1 준다.
+     * 내 유행도가 실제로 줄어든 점수를 돌려준다. 플레이어를 잠근 상태에서 부른다. 잠금 순서: 구성 원본(번호 순) → 합성 키워드.
+     */
+    private long dropPartFromHolding(Player p, PlayerKeyword pk, Long partId, Instant now) {
+        Keyword m0 = pk.getKeyword();
+        List<Long> allParts = mergeParts.findPartIds(m0.getId());
+        if (!allParts.contains(partId)) return 0;
+        List<Long> remaining = new ArrayList<>(allParts);
+        remaining.remove(partId);
+        Instant created = pk.getCreatedAt(), expires = pk.getExpiresAt();
+        long before = m0.getTrendValue();
+        Country country = p.getCountry();
+        Map<Long, Keyword> lockedParts = new LinkedHashMap<>();
+        for (Long id : allParts) lockedParts.put(id, keywords.findByIdForUpdate(id).orElseThrow());
+        Keyword m = keywords.findByIdForUpdate(m0.getId()).orElseThrow();
+        Keyword target;
+        if (remaining.size() >= 2) {
+            List<Keyword> rem = MergeKey.sorted(remaining.stream().map(lockedParts::get).toList());
+            target = keywords.findByIdForUpdate(findOrCreateMerged(country, rem, now).getId()).orElseThrow();
+        } else {
+            target = lockedParts.get(remaining.get(0));
+        }
+        playerKeywords.delete(pk);
+        playerKeywords.flush();
+        m.decHolder();
+        Optional<PlayerKeyword> old = playerKeywords.findByPlayerIdAndKeywordId(p.getId(), target.getId());
+        if (old.isPresent()) old.get().renew(created, expires); // 남은 시간 유지
+        else playerKeywords.save(new PlayerKeyword(p, target, created, expires));
+        if (target.isMerged()) target.incHolder(); // 일반 키워드로 바뀌면 그 원본의 가진 사람 수는 이미 이 플레이어를 세고 있어 그대로다
+        Keyword part = lockedParts.get(partId);
+        long oldTrend = part.getTrendValue();
+        part.decHolder();
+        p.decHold();
+        if (isState(part, CodeTables.KW_ACTIVE) && part.getDataSource().isInternal()
+                && part.getHolderCount() < settings.getInt(SettingKeys.ACTIVATE_HOLDERS)) {
+            part.deactivate(codes.keywordState(CodeTables.KW_INACTIVE), now);
+            events.publishEvent(new com.trendist.keyword.support.KeywordPageEvents.Deactivated(part.getId())); // 합성 키워드에서 빼낸다(4.44)
+        }
+        long nw = updateTrend(part);
+        keywords.flush();
+        playerKeywords.flush();
+        publishTrendChange(part, oldTrend, nw, p.getId());
+        playerService.recompute(p);
+        long after = target.isMerged() || isState(target, CodeTables.KW_ACTIVE) ? target.getTrendValue() : 0;
+        events.publishEvent(new GameEvents.HoldingChanged(country.getId(), p.getId(), m.getId(), false));
+        events.publishEvent(new GameEvents.HoldingChanged(country.getId(), p.getId(), target.getId(), true));
+        return Math.max(0, before - after);
+    }
+
+    /**
+     * 합성 보관함 행 하나가 통째로 사라질 때(만료·금지·모두 잃기): 구성 원본마다 가진 사람 수와 보유 키워드 수를 줄이고
+     * 💤 전환·점수를 고친다. 행은 이미 지운 상태에서 부른다. 잠금 순서: 구성 원본(번호 순) → 합성 키워드.
+     */
+    private void removeMergedHolding(Player p, Long mergedId) {
+        Instant now = Instant.now(clock);
+        for (Long partId : mergeParts.findPartIds(mergedId)) {
+            Keyword part = keywords.findByIdForUpdate(partId).orElse(null);
+            if (part == null) continue;
+            long oldTrend = part.getTrendValue();
+            part.decHolder();
+            p.decHold();
+            if (isState(part, CodeTables.KW_ACTIVE) && part.getDataSource().isInternal()
+                    && part.getHolderCount() < settings.getInt(SettingKeys.ACTIVATE_HOLDERS)) {
+                part.deactivate(codes.keywordState(CodeTables.KW_INACTIVE), now);
+                events.publishEvent(new com.trendist.keyword.support.KeywordPageEvents.Deactivated(part.getId())); // 합성 키워드에서 빼낸다(4.44)
+            }
+            long nw = updateTrend(part);
+            publishTrendChange(part, oldTrend, nw, p.getId());
+        }
+        keywords.findByIdForUpdate(mergedId).orElseThrow().decHolder();
+        keywords.flush();
+        playerService.recompute(p);
+        events.publishEvent(new GameEvents.HoldingChanged(p.getCountry().getId(), p.getId(), mergedId, false));
     }
 
     // ---------------------------------------------------------------- 내부
@@ -785,10 +1260,21 @@ public class KeywordServiceImpl implements KeywordService {
     }
 
     private long updateTrend(Keyword k) {
-        long v = formula.trendValue(isState(k, CodeTables.KW_ACTIVE), k.getHolderCount(), k.getDataSource().getWeight().doubleValue(),
-                population.get(k.getCountry().getId()));
+        long v = k.isMerged() ? mergedTrend(k)
+                : formula.trendValue(isState(k, CodeTables.KW_ACTIVE), k.getHolderCount(), k.getDataSource().getWeight().doubleValue(),
+                        population.get(k.getCountry().getId()), normalizedLength(k));
         k.setTrendValue(v);
         return v;
+    }
+
+    /** 정규화 값(공백 제거)의 글자 수: 글자 수 가점(4.44)에 쓴다. */
+    private static int normalizedLength(Keyword k) { return k.getNormalized().codePointCount(0, k.getNormalized().length()); }
+
+    /** 합성 키워드의 점수(4.44): 구성 원본(1성) 키워드 점수의 합 × 배율. 💤·금지 원본은 점수가 0이라 보태지 않는다. */
+    private long mergedTrend(Keyword m) {
+        long sum = 0;
+        for (Keyword part : keywords.findAllById(mergeParts.findPartIds(m.getId()))) sum += part.getTrendValue();
+        return formula.mergedValue(sum);
     }
 
     private void publishTrendChange(Keyword k, long oldTrend, long newTrend, Long excludePlayerId) {
@@ -803,14 +1289,14 @@ public class KeywordServiceImpl implements KeywordService {
     public KeywordDtos.KeywordCard detail(long userId, long keywordId, String ip, String userAgent) {
         Player p = playerService.requireCurrent(userId);
         Keyword k = keywords.findWithAiById(keywordId)
-                .filter(x -> x.getCountry().getId().equals(p.getCountry().getId()) && !isBanned(x) && !bannedWords.contains(p.getCountry().getCode(), x.getNormalized()))
+                .filter(x -> !x.isMerged() && x.getCountry().getId().equals(p.getCountry().getId()) && !isBanned(x) && !bannedWords.contains(p.getCountry().getCode(), x.getNormalized()))
                 .orElseThrow(() -> ApiException.notFound("KEYWORD_NOT_FOUND", "키워드를 찾을 수 없어요"));
         viewCounter.hit(k.getId(), ip, userAgent); // 볼 수 있는 키워드일 때만 센다(없거나 금지면 위에서 이미 404)
         return card(k, p, Instant.now(clock));
     }
 
     private KeywordDtos.KeywordCard card(Keyword k, Player p, Instant now) {
-        Optional<PlayerKeyword> mine = playerKeywords.findByPlayerIdAndKeywordId(p.getId(), k.getId()).filter(pk -> !pk.isExpired(now));
+        Optional<PlayerKeyword> mine = covering(p.getId(), k.getId(), now); // 합성 키워드로 가진 것도 가진 것(4.44)
         String ai = k.getAiComment() == null ? null : k.getAiComment().getComment();
         return new KeywordDtos.KeywordCard(k.getId(), k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
                 k.getHolderCount(), k.getAddCount(),

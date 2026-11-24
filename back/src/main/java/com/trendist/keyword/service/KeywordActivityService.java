@@ -18,6 +18,9 @@ public interface KeywordActivityService {
     /** 활동 그래프. 내 나라 키워드만, 금지 키워드는 볼 수 없다. range: 24h / 7d / 30d / 180d. */
     KeywordDtos.Activity activity(long userId, long keywordId, String range);
 
+    /** 합성 키워드의 통합 활동 그래프(4.44): 구성 원본 키워드의 활동 그래프를 합산한다. */
+    KeywordDtos.Activity mergedActivity(long userId, long mergedKeywordId, String range);
+
     /** 공개 키워드 페이지(4.28)용 활동 그래프. 로그인·나라 확인 없이, 금지 키워드는 없는 것으로 본다. */
     KeywordDtos.Activity publicActivity(long keywordId, String range);
 }

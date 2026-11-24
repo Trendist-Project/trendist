@@ -61,7 +61,7 @@ public class ReportServiceImpl implements ReportService {
             case "KEYWORD" -> {
                 // 키워드 상세 팝업(4.12)에서 신고한다. 볼 수 없는 키워드(금지·금지어 포함)는 신고할 수도 없다
                 var k = keywordRepo.findById(targetId).orElseThrow(ReportServiceImpl::notFound);
-                if (k.getKeywordState().getId().equals(codes.keywordStateId(CodeTables.KW_BANNED))
+                if (k.isMerged() || k.getKeywordState().getId().equals(codes.keywordStateId(CodeTables.KW_BANNED))
                         || bannedWords.contains(k.getCountry().getCode(), k.getNormalized())) throw notFound();
                 typeName = ReportType.KEYWORD;
                 countryId = k.getCountry().getId();

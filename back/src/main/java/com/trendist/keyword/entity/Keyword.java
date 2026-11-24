@@ -31,6 +31,10 @@ public class Keyword extends BaseTimeEntity {
     @Column(name = "banned_at", columnDefinition = "DATETIME(6)") private Instant bannedAt;
     /** 목록형 외부 소스(google)로 활성이 유지되는 끝 시각. 지나면 그 소스 목록에 아직 있는지 다시 본다(10.2). */
     @Column(name = "external_until", columnDefinition = "DATETIME(6)") private Instant externalUntil;
+    /** 합성 키워드(4.44): 검색에 나오지 않고 합성으로만 존재한다. normalized는 `~` + 구성 번호 해시라 입력할 수 없는 값이다. */
+    @Column(name = "is_merged", nullable = false) private boolean merged;
+    /** 성(★) = 구성 원본(1성) 키워드 수. 일반 키워드는 1(4.44). */
+    @Column(name = "star_count", nullable = false) private int starCount = 1;
 
     /** AI 한 줄 설명(4.12). 처음 만들기를 시도할 때 행이 생기고, 그 전에는 null이다. 설명 내용은 {@link KeywordAiComment}가 갖는다. */
     @OneToOne(fetch = FetchType.LAZY) @JoinColumn(name = "ai_comment_id", unique = true)
@@ -40,6 +44,15 @@ public class Keyword extends BaseTimeEntity {
     public Keyword(Country country, DataSource source, KeywordState state, String text, String normalized) {
         this.country = country; this.dataSource = source; this.keywordState = state;
         this.text = text; this.normalized = normalized;
+    }
+
+    /** 합성 키워드(4.44). 상태는 항상 🔥활성이다. */
+    public static Keyword merged(Country country, DataSource source, KeywordState active, String text, String normalized, int stars, Instant now) {
+        Keyword k = new Keyword(country, source, active, text, normalized);
+        k.merged = true;
+        k.starCount = stars;
+        k.activate(active, now);
+        return k;
     }
 
     public void setDataSource(DataSource dataSource) { this.dataSource = dataSource; }

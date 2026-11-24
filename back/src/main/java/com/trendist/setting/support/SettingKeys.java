@@ -17,6 +17,12 @@ public final class SettingKeys {
     public static final String EXP_SCORE_CAP = "exp_score_cap";
     public static final String PLUS_TTL_HOURS = "plus_ttl_hours";
     public static final String ACTIVATE_HOLDERS = "activate_holders";
+    public static final String KEYWORD_LENGTH_BONUS_PER_CHAR = "keyword_length_bonus_per_char";
+    public static final String MERGE_ENABLED = "merge_enabled";
+    public static final String MERGE_SCORE_MULTIPLIER = "merge_score_multiplier";
+    public static final String MERGE_EXPIRE_HOURS = "merge_expire_hours";
+    public static final String MERGE_BONUS_BASE_PERCENT = "merge_bonus_base_percent";
+    public static final String MERGE_BONUS_DECAY_PERCENT = "merge_bonus_decay_percent";
     public static final String EXP_PER_PLUS = "exp_per_plus";
     public static final String ATTACK_EXP = "attack_exp";
     public static final String KILL_EXP = "kill_exp";
@@ -152,6 +158,13 @@ public final class SettingKeys {
             new Def(EXP_SCORE_CAP, "0", 0, 1000, "EXP 점수 반영 상한(기본 0 = 레벨·EXP는 원 크기와 싸움 판정에 관여하지 않고 점수는 키워드로만 정해진다)"),
             new Def(PLUS_TTL_HOURS, "24", 1, 168, "+ 삭제 시간"),
             new Def(ACTIVATE_HOLDERS, "3", 1, 1000, "🔥활성 전환 인원"),
+            // 키워드 합성(4.44): 글자 수 가점과 합성 규칙. 점수에는 상한이 없다
+            new Def(KEYWORD_LENGTH_BONUS_PER_CHAR, "1", 0, 100, "키워드 글자 수 가점: 공백을 뺀 글자 하나당 🔥 키워드 점수에 더하는 점수(0이면 끔)"),
+            new Def(MERGE_ENABLED, "1", 0, 1, "키워드 합성 켜기(1) / 끄기(0)"),
+            new Def(MERGE_SCORE_MULTIPLIER, "2", 0, 100, "합성 점수 배율: 구성 원본(1성) 키워드 점수의 합에 곱하는 값"),
+            new Def(MERGE_EXPIRE_HOURS, "24", 1, 720, "합성 키워드 유지 시간(합성한 시점부터, 몇 성이든 같다)"),
+            new Def(MERGE_BONUS_BASE_PERCENT, "40", 0, 100, "합성 +1성 보너스 확률: 결과가 2성일 때의 확률(0이면 보너스 없음)"),
+            new Def(MERGE_BONUS_DECAY_PERCENT, "50", 1, 99, "합성 +1성 보너스 확률 감소율: 결과 성이 1 오를 때마다 확률이 이 비율로 줄어든다(50 = 절반)"),
             new Def(EXP_PER_PLUS, "1", 0, 100, "+ 한 번의 EXP"),
             new Def(ATTACK_EXP, "1", 0, 100, "공격에 성공할 때마다 얻는 EXP(키워드를 빼앗거나 잃게 한 것마다, 봇이 상대여도, 불꽃으로 모두 잃게 해도 한 번)"),
             new Def(KILL_EXP, "5", 0, 1000, "상대를 죽였을 때 얻는 EXP(키워드가 없는 사람·봇을 쓰러뜨렸을 때)"),
@@ -293,7 +306,7 @@ public final class SettingKeys {
     // ---------------------------------------------------------------- 관리자 화면 그룹(13.3)
 
     /** 관리자 설정 화면의 그룹 순서. 새 설정을 만들면 아래 GROUP_OF에서 그룹을 정한다(없으면 "기타"). */
-    public static final List<String> GROUP_ORDER = List.of("트렌드·키워드", "성장·경험치·칭호", "맵·크기", "이동·충돌", "보호·접속",
+    public static final List<String> GROUP_ORDER = List.of("트렌드·키워드", "합성", "성장·경험치·칭호", "맵·크기", "이동·충돌", "보호·접속",
             "세이프존", "? 구슬", "NPC 봇", "스킬", "일일 제한·돌림판", "콤보·불꽃", "체력(HP)", "아레나 배경·연출", "꾸미기·계정", "AI 설명", "기타");
 
     private static final java.util.Map<String, String> GROUP_OF = new java.util.HashMap<>();
@@ -306,7 +319,9 @@ public final class SettingKeys {
         // 각 그룹 안의 나열 순서가 관리자 화면에 보이는 순서다(settings.sort_order). 비슷한 설정끼리 붙여 적는다
         group("트렌드·키워드", TREND_FULL_SHARE, TREND_MIN_POPULATION, TREND_LOG_SOFTNESS, TREND_BASE_RATIO, TREND_MAX_BASE, // 트렌드 값 식
                 ACTIVATE_HOLDERS, PLUS_TTL_HOURS,                                                                           // 키워드 상태·수명
-                EXTERNAL_CONFIRM_HEAT, EXTERNAL_HOLD_HOURS);                                                                // 외부 소스
+                EXTERNAL_CONFIRM_HEAT, EXTERNAL_HOLD_HOURS,                                                                 // 외부 소스
+                KEYWORD_LENGTH_BONUS_PER_CHAR);                                                                             // 글자 수 가점
+        group("합성", MERGE_ENABLED, MERGE_SCORE_MULTIPLIER, MERGE_EXPIRE_HOURS, MERGE_BONUS_BASE_PERCENT, MERGE_BONUS_DECAY_PERCENT);
         group("성장·경험치·칭호", EXP_PER_PLUS, ATTACK_EXP, KILL_EXP, EXP_SCORE_CAP, RANK_TITLE_MIN_PLAYERS);
         group("맵·크기", WORLD_SIZE, AREA_GROW_SPEED, AREA_SHRINK_SPEED,           // 활동 영역
                 MIN_RADIUS, MAX_RADIUS, EAT_MIN_REACH, SCORE_CAP, ZOOM_FACTOR, VIEW_RANGE_MULTIPLIER);                // 원 크기
@@ -370,18 +385,18 @@ public final class SettingKeys {
                 ABSORB_SECONDS, ABSORB_TICK_SECONDS, ROOT_SECONDS, SILENCE_SECONDS, CONFUSE_SECONDS, AMPLIFY_SECONDS, FORTIFY_SECONDS, BARRIER_SECONDS);
         unit("분", WHEEL_COOLDOWN_MINUTES, NICKNAME_CHANGE_MINUTES, ART_CHANGE_MINUTES, DAILY_RESET_MINUTE);
         unit("시", DAILY_RESET_HOUR);
-        unit("시간", PLUS_TTL_HOURS, EXTERNAL_HOLD_HOURS);
+        unit("시간", PLUS_TTL_HOURS, EXTERNAL_HOLD_HOURS, MERGE_EXPIRE_HOURS);
         unit("px", ZONE_REACH_PX, HOOK_REACH_PX, BOLT_REACH_PX, REPEL_REACH_PX, WORLD_SIZE, MIN_RADIUS, EAT_MIN_REACH, MAX_RADIUS, SAFE_CENTER_MIN, SAFE_ZONE_MIN);
         unit("px/s", MAX_SPEED, AREA_GROW_SPEED, AREA_SHRINK_SPEED);
-        unit("배", VIEW_RANGE_MULTIPLIER, AMPLIFY_MULTIPLIER, HP_FLAME_MULTIPLIER, BIG_RATIO, KNOCKBACK_CAP, BOT_CAP_RATIO, DASH_SPEED_MULTIPLIER, REPEL_SPEED_MULTIPLIER,
+        unit("배", MERGE_SCORE_MULTIPLIER, VIEW_RANGE_MULTIPLIER, AMPLIFY_MULTIPLIER, HP_FLAME_MULTIPLIER, BIG_RATIO, KNOCKBACK_CAP, BOT_CAP_RATIO, DASH_SPEED_MULTIPLIER, REPEL_SPEED_MULTIPLIER,
                 REPEL_KNOCKBACK);
-        unit("%", SKILL_HIT_DAMAGE_PERCENT, FORTIFY_PERCENT, BARRIER_HP_PERCENT, BERSERK_DRAIN_PERCENT, BERSERK_MIN_HP_PERCENT, SKILL_HEAL_PERCENT, SLOW_PERCENT, ORB_SPAWN_PERCENT, ORB_ACTIVE_PERCENT, HP_SAFE_REGEN_PERCENT, HP_KILL_HEAL_PERCENT, DEATH_LOSE_PERCENT, FLAME_HIT_LOSE_PERCENT);
+        unit("%", MERGE_BONUS_BASE_PERCENT, MERGE_BONUS_DECAY_PERCENT, SKILL_HIT_DAMAGE_PERCENT, FORTIFY_PERCENT, BARRIER_HP_PERCENT, BERSERK_DRAIN_PERCENT, BERSERK_MIN_HP_PERCENT, SKILL_HEAL_PERCENT, SLOW_PERCENT, ORB_SPAWN_PERCENT, ORB_ACTIVE_PERCENT, HP_SAFE_REGEN_PERCENT, HP_KILL_HEAL_PERCENT, DEATH_LOSE_PERCENT, FLAME_HIT_LOSE_PERCENT);
         unit("명", TREND_MIN_POPULATION, ACTIVATE_HOLDERS, BOT_PLAYERS, BOT_MIN_PLAYERS, RANK_TITLE_MIN_PLAYERS);
         unit("개", ORB_MAX, SAFE_ZONE_MAX, AI_COMMENT_BATCH_SIZE, FIREBALL_COUNT, QUAKE_DROP_KEYWORDS);
         unit("겹", POISON_MAX_STACKS, SLOW_MAX_STACKS);
         unit("개/1000×1000px", ORB_DENSITY);
         unit("개/10000×10000px", SAFE_ZONE_DENSITY);
-        unit("점", TREND_BASE_RATIO, TREND_MAX_BASE, EXP_SCORE_CAP, SCORE_CAP);
+        unit("점", KEYWORD_LENGTH_BONUS_PER_CHAR, TREND_BASE_RATIO, TREND_MAX_BASE, EXP_SCORE_CAP, SCORE_CAP);
         unit("EXP", EXP_PER_PLUS, ATTACK_EXP, KILL_EXP);
         unit("레벨", CUSTOMIZE_UNLOCK_LEVEL);
         unit("콤보", COMBO_FLAME_AT);

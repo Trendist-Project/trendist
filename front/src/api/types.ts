@@ -66,6 +66,28 @@ export interface MyKeyword {
   trendValue: number;
   plusedAt: string;
   expiresAt: string;
+  /** 합성 키워드(4.44): merged면 stars는 구성 원본 수, parts는 구성 원본. 일반 키워드는 false·1·[] */
+  merged: boolean;
+  stars: number;
+  parts: MergedPart[];
+}
+
+/** 합성 키워드의 구성 원본 한 개(4.44) */
+/** 보관함 카드 등급 기준(4.42): normalMax는 노멀 등급의 끝, mins는 레어·에픽·유니크·레전드리·신화의 최소 점수 */
+export interface GradeInfo { normalMax: number; mins: number[] }
+
+export interface MergedPart { keywordId: number; text: string; state: KeywordState; trendValue: number }
+
+/** 합성 미리보기(4.44). 항상 200이고 ok=false면 reason에 합칠 수 없는 이유가 있다 */
+export interface MergePreview {
+  ok: boolean; reason: string | null; text: string; stars: number; partSum: number; multiplier: number; score: number;
+  expireHours: number; length: number; maxLength: number; bonusPercent: number; bonusPossible: boolean; parts: MergedPart[];
+}
+export interface MergeResult { keyword: MyKeyword; bonus: boolean; bonusPart: MergedPart | null; gained: number; player: PlayerSummary }
+/** 합성 키워드 상세 창(4.44): parts는 구성 원본의 일반 키워드 카드 */
+export interface MergedDetail {
+  keywordId: number; text: string; stars: number; trendValue: number; partSum: number; multiplier: number;
+  myExpiresAt: string | null; parts: KeywordCard[];
 }
 
 /** 활동 그래프의 점(9.9). t는 구간 시작, search·plus는 구간 증분, holders는 구간 끝의 가진 사람 수. live면 집계 중. */
@@ -87,7 +109,7 @@ export interface ScorePoint { t: string; score: number; live: boolean }
 export interface ScoreHistory { range: ScoreRange; timezone: string; points: ScorePoint[] }
 
 /** 같은 방 다른 플레이어 정보(4.11). entityNo는 방 안에서만 쓰는 번호, 키워드는 이름과 상태만. */
-export interface KeywordTag { keywordId: number; text: string; state: KeywordState }
+export interface KeywordTag { keywordId: number; text: string; state: KeywordState; merged: boolean; stars: number }
 export interface PlayerCard {
   entityNo: number; nickname: string; title: string | null;
   level: number; score: number; commentScore: number; topKeywords: KeywordTag[];
@@ -169,3 +191,6 @@ export interface KeybindingsResponse { bindings: KeyBindingInfo[]; keys: KeyInfo
 
 /** aimed: 쓸 때 겨눈 지점을 함께 보내는 스킬(없으면 옛 서버라 클라이언트의 기본 목록 값을 쓴다) */
 export interface SkillInfo { code: string; category: string; defaultKey: string; cooldownSeconds: number; requiredLevel: number; aimed?: boolean }
+
+/** 게임 화면 UI 선택(계정 저장). sideWidth/sideHeight가 null이면 기본 크기 */
+export interface UiPrefsResponse { saved: boolean; minimap: boolean; leaderboard: boolean; chat: 'open' | 'collapsed' | 'off'; help: boolean; autoFullscreen: boolean; sideHidden: boolean; sideWidth: number | null; sideHeight: number | null }

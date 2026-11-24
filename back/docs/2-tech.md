@@ -137,7 +137,7 @@ WHERE p.id IN (/* 500명 */)
   AND p.current_score <> LEAST(p.exp, 100) + COALESCE(t.score, 0);
 ```
 
-- 전체 점검(1시간): 보관함이 있는 플레이어 전원을 같은 방식으로 다시 합산하고, `hold_count`도 만료되지 않은 `player_keywords` 행 수로 맞춘다. 접속 중인 플레이어는 합산 결과와 방 메모리 값을 비교해서 다르면 메모리를 고친다. 행이 하루치뿐이라 부담이 작다(베타에서 측정).
+- 전체 점검(1시간): 보관함이 있는 플레이어 전원을 같은 방식으로 다시 합산하고, `hold_count`도 만료되지 않은 `player_keywords` 항목의 성(`keywords.star_count`, 일반 키워드는 1, 합성 키워드 4.44는 구성 원본 수)의 합으로 맞춘다. 접속 중인 플레이어는 합산 결과와 방 메모리 값을 비교해서 다르면 메모리를 고친다. 행이 하루치뿐이라 부담이 작다(베타에서 측정).
 
 ### 9.5 요청 빈도 제한
 - Caffeine 메모리 + 슬라이딩 윈도 로그(키마다 최근 요청 시각 N개). 통과한 요청만 기록한다. 서버가 여러 대가 되면 Redis로 옮긴다.
@@ -258,7 +258,7 @@ WHERE p.id IN (/* 500명 */)
 |---|---|---|
 | `search_count` | 검색수. 검색창에서 이 키워드로 찾아진 횟수(💤 포함, ⛔와 없는 단어 제외). 같은 사용자(방문자 ID)의 같은 키워드는 한 시간에 한 번만 센다 | 메모리 카운터를 매시 정각에 더함 |
 | `add_count` | 추가수. 24시간 삭제·충돌로 잃어도 줄지 않는다(💤, 만료 행 재사용 포함) | `+` 트랜잭션에서 +1 |
-| `holder_count` | 지금 가진 사람 수(`player_keywords` 행 수 캐시). 💤↔🔥 전환과 트렌드 값 계산(4.8)에 쓴다 | `+`(새 행) +1, 24시간 삭제·충돌로 잃기 −1 |
+| `holder_count` | 지금 가진 사람 수(`player_keywords` 행 수 캐시). 💤↔🔥 전환과 트렌드 값 계산(4.8)에 쓴다. 합성 키워드(4.44, 개정안)를 가진 사람도 구성 원본을 가진 것으로 한 사람당 한 번만 센다 | `+`(새 행) +1, 24시간 삭제·충돌로 잃기 −1, 합성·합성에서 빠짐 ±1 |
 
 기록 테이블
 
@@ -370,6 +370,7 @@ WHERE p.id IN (/* 500명 */)
 | | `skills` | 스킬(4.33): 코드·종류·기본 단축키(`default_key`, KeyboardEvent.code)·쿨타임(`cooldown_seconds`)·해금 레벨(`required_level`)·사용 여부·순서. 이름·설명은 번역이 필요한 화면 문구라 DB가 아니라 프론트엔드 번역 파일(`skills.<코드>_name`·`_desc`)에 둔다. 스킬을 늘리거나 쿨타임·기본 키를 고칠 때는 DB를 바꾼다(관리자 편집기는 만들지 않는다). 없는 코드의 행만 시더가 채운다 |
 | | `key_categories`·`keyboard_keys`·`action_types`·`actions`·`key_bindings` | 단축키(4.33, V28): 키 목록(`keyboard_keys`, KEYS가 MySQL 예약어라 이 이름. 코드는 KeyboardEvent.code, 막은 키 `reserved`, 숫자패드↔숫자 짝 `alias_of_id`, 분류는 `key_categories`)과 키를 묶을 수 있는 동작 목록(`actions`: 스킬 칸 `skill_slot_1~4`·`dash`, 종류는 `action_types`, 기본 키 `default_key_id`)은 시더(`KeybindingSeeder`)가 채운다. 플레이어가 바꾼 연결만 `key_bindings`(플레이어 × 동작 × 키)에 저장하고 행이 없으면 기본 키, `key_id`가 NULL이면 일부러 비운 것이다. 한 동작은 한 키만, 한 키는 한 동작에만 쓴다(유일 제약, 기본 키와의 겹침과 숫자패드 짝은 서비스가 검사). API: `GET/PUT/DELETE /api/me/keybindings` |
 | | `user_sound_settings` | 계정별 소리 설정(4.39, V81): 사용자마다 한 줄(`user_id` 유일, 계정 삭제 시 함께 삭제). 효과음·배경음 켜짐, 마스터·효과음·배경음 음량(0~100) |
+| | `user_ui_settings` | 계정별 게임 화면 설정(4.45, V83): 사용자마다 한 줄(`user_id` 유일, 계정 삭제 시 함께 삭제). 미니맵·리더보드·채팅 보기·조작 설명·자동 전체 화면·오른쪽 영역 숨김과 크기(`side_width`·`side_height`, NULL이면 기본) |
 | 운영 | `config_changes` | 설정 변경 이력(13.17, V34): 범위(`SETTING`·`MONSTER`·`SKILL`)·대상·항목·이전 값·이후 값·관리자(번호와 닉네임)·메모·되돌린 이력 번호. 설정을 바꾸는 서비스가 같은 트랜잭션에서 남긴다 |
 | 몬스터 | `monster_types`, `monster_settings`, `monster_spawns`, `monster_damages` | 몬스터(4.35, V33): 종류(코드·이름·분류 `kind`·행동 키 `behavior`·그림 키·정기 등장 여부), 종류마다의 설정값(이름 → 값·허용 범위·단위·그룹), 등장 기록(나라·방식·결과·체력·그때의 접속 수·평균·1등 유행도·피해 1위), 등장마다 플레이어별 피해. 새 몬스터는 `monster_types`에 행을 더하고 서버에 행동(`Monster` 구현)을 더하면 되고, 설정값은 `MonsterDefs`가 시더(`MonsterSeeder`)로 채운다 |
 | | `player_skill_slots` | 스킬 장착(4.33, V29): 플레이어 × 칸(`actions` 중 종류가 `SKILL_SLOT`인 동작)에 끼운 스킬(`skill_id`, `skills.id` 외래 키). 칸 수는 그 동작의 수라서 칸을 늘리려면 `actions`에 행만 더하면 되고, 단축키 칸과 장착 칸이 한 목록을 따른다. `skill_id`가 NULL이면 일부러 비운 칸이고, 플레이어의 행이 하나도 없으면 아직 고른 적 없어서 해금된 스킬이 해금 순서대로 채워진다. 이전의 `players.skill_slots`(V27, 배포된 적 없음)는 V29에서 지웠다 |

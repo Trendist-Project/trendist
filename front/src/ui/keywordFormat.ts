@@ -23,3 +23,13 @@ export function ago(iso: string) {
   if (s < 86400) return t('common.hoursAgo', { n: Math.floor(s / 3600) });
   return new Intl.DateTimeFormat(intlLocale(), { month: 'short', day: 'numeric', timeZone: getLang() === 'ko' ? 'Asia/Seoul' : undefined }).format(new Date(iso));
 }
+
+/** 보관함 카드의 남은 시간: 두 자리 숫자와 한 글자 단위(예: 23h, 32m). 60분 미만은 분, 100시간 미만은 시간, 그 이상은 일 */
+export function shortLeft(iso: string, now = Date.now()): { n: string; unit: 'm' | 'h' | 'd' } {
+  const pad = (v: number) => String(Math.min(99, Math.max(0, v))).padStart(2, '0');
+  const mins = Math.ceil((new Date(iso).getTime() - now) / 60000);
+  if (mins < 60) return { n: pad(mins), unit: 'm' };
+  const hours = Math.floor(mins / 60);
+  if (hours < 100) return { n: pad(hours), unit: 'h' };
+  return { n: pad(Math.floor(hours / 24)), unit: 'd' };
+}

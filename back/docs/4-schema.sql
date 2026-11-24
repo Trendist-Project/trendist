@@ -261,6 +261,24 @@ CREATE TABLE user_sound_settings (
   CONSTRAINT fk_user_sound_settings_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='계정별 소리 설정(4.39, V81). 행이 없으면 저장한 적이 없는 것(화면이 이 브라우저의 값을 올려 보낸다)';
 
+CREATE TABLE user_ui_settings (
+  id              BIGINT NOT NULL AUTO_INCREMENT COMMENT '화면 설정 ID',
+  user_id         BIGINT NOT NULL COMMENT '사용자(계정) ID. 나라와 무관하게 계정마다 한 줄',
+  minimap_on      BOOLEAN NOT NULL COMMENT '미니맵 켜짐',
+  leaderboard_on  BOOLEAN NOT NULL COMMENT '리더보드 켜짐',
+  chat_view       VARCHAR(12) NOT NULL COMMENT '채팅 보기: open(펼침) / collapsed(접힘) / off(끔)',
+  help_open       BOOLEAN NOT NULL COMMENT '조작 설명 펼침',
+  auto_fullscreen BOOLEAN NOT NULL COMMENT '자동 전체 화면 켜짐(모바일 시작 때)',
+  side_hidden     BOOLEAN NOT NULL COMMENT '오른쪽 영역(검색·보관함·플레이어) 숨김(PC)',
+  side_width      INT NULL COMMENT '오른쪽 영역 너비 px(200~1200). NULL이면 기본 크기',
+  side_height     INT NULL COMMENT '하단 시트 높이 px(120~2000). NULL이면 기본 크기',
+  created_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '만든 시각',
+  updated_at      DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT '바뀐 시각',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_user_ui_settings_user (user_id),
+  CONSTRAINT fk_user_ui_settings_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='계정별 게임 화면 설정(4.45, V83). 행이 없으면 저장한 적이 없는 것(화면이 이 브라우저의 값을 올려 보낸다)';
+
 CREATE TABLE player_skill_slots (
   id         BIGINT NOT NULL AUTO_INCREMENT COMMENT '장착 ID',
   player_id  BIGINT NOT NULL COMMENT '플레이어 ID',
@@ -339,11 +357,13 @@ CREATE TABLE keywords (
   keyword_state_id BIGINT NOT NULL COMMENT '키워드 상태 ID(활성/비활성/금지)',
   text             VARCHAR(20) NOT NULL COMMENT '표시용 키워드(최대 20자, 입력한 표기 유지)',
   normalized       VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT '정규화 키워드(같은 단어 판정용 유일 키, 바이트 비교. NFKC·소문자·공백 제거, 규칙은 4.18)',
-  trend_value      BIGINT NOT NULL DEFAULT 0 COMMENT '트렌드 값(0~100 정수, 반올림). 활성 상태면 반영 소스 가중치 × (3 + 47 × g(가진 비율)), 그 외 0. 가진 비율 = holder_count / 그 나라 활동 인원, g는 4.8. 키워드 점수 = trend_value',
+  trend_value      BIGINT NOT NULL DEFAULT 0 COMMENT '트렌드 값(0 이상 정수, 반올림, 상한 없음 4.44). 활성 상태면 반영 소스 가중치 × (3 + 47 × g(가진 비율)), 그 외 0. 가진 비율 = holder_count / 그 나라 활동 인원, g는 4.8. 키워드 점수 = trend_value',
   search_count     BIGINT NOT NULL DEFAULT 0 COMMENT '검색수(매시 메모리 카운터를 더함)',
   add_count        BIGINT NOT NULL DEFAULT 0 COMMENT '추가수(`+` 횟수, 삭제·잃기로 줄지 않음)',
-  holder_count     BIGINT NOT NULL DEFAULT 0 COMMENT '지금 가진 사람 수(player_keywords 행 수 캐시)',
+  holder_count     BIGINT NOT NULL DEFAULT 0 COMMENT '지금 가진 사람 수(player_keywords 행 수 캐시. 합성 키워드를 가진 사람도 구성 원본을 가진 것으로 센다, 4.44)',
   view_count       BIGINT NOT NULL DEFAULT 0 COMMENT '키워드 조회 수: 공개 키워드 페이지와 게임 안 상세 팝업을 연 횟수(같은 방문자 키워드마다 하루 1번, 크롤러 제외, 4.28). 마이그레이션 V2',
+  is_merged        TINYINT(1) NOT NULL DEFAULT 0 COMMENT '합성 키워드 여부(4.44, V82). 1이면 normalized는 `~` + 구성 번호 SHA-1이라 검색에 나오지 않는다',
+  star_count       INT NOT NULL DEFAULT 1 COMMENT '성(★) = 구성 원본(1성) 키워드 수(4.44, V82). 일반 키워드는 1',
   activated_at     DATETIME(6) NULL COMMENT '처음 🔥활성이 된 시각(NULL이면 한 번도 활성 전)',
   inactive_at      DATETIME(6) NULL COMMENT '비활성 전환 시각',
   banned_at        DATETIME(6) NULL COMMENT '금지 시각',
@@ -360,6 +380,15 @@ CREATE TABLE keywords (
   CONSTRAINT fk_keywords_keyword_state FOREIGN KEY (keyword_state_id) REFERENCES keyword_states (id),
   CONSTRAINT fk_keywords_ai_comment FOREIGN KEY (ai_comment_id) REFERENCES keyword_ai_comments (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='키워드(지역별)';
+
+CREATE TABLE keyword_merge_parts (
+  keyword_id      BIGINT NOT NULL COMMENT '합성 키워드(keywords.is_merged = 1, 4.44, V82)',
+  part_keyword_id BIGINT NOT NULL COMMENT '구성 원본(1성) 키워드(keywords)',
+  PRIMARY KEY (keyword_id, part_keyword_id),
+  KEY idx_keyword_merge_parts_part (part_keyword_id),
+  CONSTRAINT fk_keyword_merge_parts_keyword FOREIGN KEY (keyword_id) REFERENCES keywords (id) ON DELETE CASCADE,
+  CONSTRAINT fk_keyword_merge_parts_part FOREIGN KEY (part_keyword_id) REFERENCES keywords (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='합성 키워드의 구성 원본(4.44, 개정안)';
 
 CREATE TABLE keyword_ai_requests (
   id           BIGINT NOT NULL AUTO_INCREMENT COMMENT '요청 ID',

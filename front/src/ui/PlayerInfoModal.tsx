@@ -7,6 +7,7 @@ import { PlayerOrb } from './PlayerOrb';
 import { BOT_BASE } from '../game/turtle';
 import type { OrbLook } from '../game/skin';
 import { STATE_BADGE } from './keywordFormat';
+import { starLabel } from './mergeFormat';
 import { Modal } from './Modal';
 import { ReportDialog } from './ReportDialog';
 import { PopularityVote } from './PopularityVote';
@@ -22,7 +23,8 @@ interface Props {
   /** 그 원의 아레나 모양(바탕색·테두리·그림·효과). 봇은 빨간 바탕. 없으면 기본 성장 거북이 */
   look?: OrbLook | null;
   onClose(): void;
-  onOpenKeyword(keywordId: number): void;
+  /** merged: 합성 키워드(4.44)면 전용 상세 창을 연다 */
+  onOpenKeyword(keywordId: number, merged?: boolean): void;
   /** [공유]: 채팅에 이 플레이어를 보낸다(채팅의 닉네임을 누르면 이 카드가 열린다). 없으면 버튼을 숨긴다 */
   onShare?(playerId: number, nickname: string): void;
   /** 신고 결과 안내(알림창) */
@@ -101,9 +103,9 @@ export function PlayerInfoModal({ entityNo, playerId, bot, look, onClose, onOpen
             <ol>
               {card.topKeywords.map((k, i) => (
                 <li key={k.keywordId}>
-                  <button className="mine-open pi-kw" onClick={() => onOpenKeyword(k.keywordId)} aria-label={t('player.detailAria', { text: k.text })}>
+                  <button className="mine-open pi-kw" onClick={() => onOpenKeyword(k.keywordId, k.merged)} aria-label={t('player.detailAria', { text: k.text })}>
                     <span className={`pi-rank r${i + 1}`} aria-hidden="true">{i + 1}</span>
-                    <span className="pi-kw-text"><strong>{k.text}</strong> <span className="badge">{STATE_BADGE[k.state] ?? k.state}</span></span>
+                    <span className="pi-kw-text">{(k.merged || k.state === '활성') && <span className="merge-star" role="img" aria-label={t('merge.starsAria', { n: k.stars })}>{starLabel(k.stars)}</span>}<strong>{k.text}</strong> <span className="badge">{STATE_BADGE[k.state] ?? k.state}</span></span>
                     <span className="mine-chevron" aria-hidden="true">›</span>
                   </button>
                 </li>

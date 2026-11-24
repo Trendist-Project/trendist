@@ -17,7 +17,7 @@ public final class PlayerDtos {
     public record ScoreHistory(String range, String timezone, java.util.List<ScorePoint> points) {}
 
     /** 정보 팝업에 보이는 키워드(4.11): 이름과 상태만. 점수·시각은 숨긴다. */
-    public record KeywordTag(long keywordId, String text, String state) {}
+    public record KeywordTag(long keywordId, String text, String state, boolean merged, int stars) {}
 
     /**
      * 다른 플레이어 정보 팝업(4.11). 사용자 번호 대신 방 안에서만 쓰는 세션 엔티티 번호로 가리킨다(4.1).

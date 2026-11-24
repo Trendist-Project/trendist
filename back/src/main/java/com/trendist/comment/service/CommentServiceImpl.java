@@ -160,7 +160,7 @@ public class CommentServiceImpl implements CommentService {
 
     private Keyword requireKeyword(Player me, long keywordId) {
         return keywords.findById(keywordId)
-                .filter(k -> sameCountry(me, k) && !CodeTables.KW_BANNED.equals(k.getKeywordState().getName()))
+                .filter(k -> !k.isMerged() && sameCountry(me, k) && !CodeTables.KW_BANNED.equals(k.getKeywordState().getName()))
                 .orElseThrow(() -> ApiException.notFound("KEYWORD_NOT_FOUND", "키워드를 찾을 수 없어요"));
     }
 

@@ -21,7 +21,7 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
     /** AI 설명을 아직 못 받은 키워드(처음 🔥가 된 적 있고, 금지 아님, 설명 행이 없거나 설명이 비고 시도 횟수가 한도 미만). 최근에 🔥가 된 것부터 */
     @Query("""
             select k.id from Keyword k left join k.aiComment a
-            where k.activatedAt is not null and k.keywordState.id <> :bannedId
+            where k.merged = false and k.activatedAt is not null and k.keywordState.id <> :bannedId
               and (a.id is null or (a.comment is null and a.attempts < :maxAttempts))
             order by k.activatedAt desc""")
     List<Long> findIdsNeedingAiComment(@Param("bannedId") Long bannedId, @Param("maxAttempts") long maxAttempts,
@@ -30,11 +30,11 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
     /** 관리자 AI 설명 목록(요청 없이 보는 "설명 없음"과 "전체"). withComment가 true면 설명이 있는 것, false면 없는 것 */
     @Query(value = """
             select k from Keyword k join fetch k.keywordState left join fetch k.aiComment a
-            where k.country.id = :countryId and k.activatedAt is not null and k.keywordState.id <> :bannedId
+            where k.merged = false and k.country.id = :countryId and k.activatedAt is not null and k.keywordState.id <> :bannedId
               and ((:withComment = true and a.comment is not null) or (:withComment = false and a.comment is null))""",
             countQuery = """
             select count(k) from Keyword k left join k.aiComment a
-            where k.country.id = :countryId and k.activatedAt is not null and k.keywordState.id <> :bannedId
+            where k.merged = false and k.country.id = :countryId and k.activatedAt is not null and k.keywordState.id <> :bannedId
               and ((:withComment = true and a.comment is not null) or (:withComment = false and a.comment is null))""")
     org.springframework.data.domain.Page<Keyword> findForAdminAi(@Param("countryId") Long countryId, @Param("bannedId") Long bannedId,
                                                                  @Param("withComment") boolean withComment,
@@ -52,6 +52,14 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
     @Query("select k from Keyword k join fetch k.dataSource where k.keywordState.id = :stateId")
     List<Keyword> findAllByStateWithSource(@Param("stateId") Long stateId);
 
+    /** 이 나라·글자 길이 안에서 합성 +1성 보너스 후보가 될 수 있는 🔥 일반 키워드의 [번호, 이름](4.44). */
+    @Query("select k.id, k.text from Keyword k where k.merged = false and k.country.id = :countryId and k.keywordState.id = :activeId")
+    List<Object[]> findMergeBonusPool(@Param("countryId") Long countryId, @Param("activeId") Long activeId);
+
+    /** 관리자: 합성 키워드 목록(4.44). 가진 사람이 많은 순. */
+    @Query("select k from Keyword k where k.merged = true and k.country.id = :countryId order by k.holderCount desc, k.trendValue desc, k.id desc")
+    List<Keyword> findMergedByCountry(@Param("countryId") Long countryId, org.springframework.data.domain.Pageable pageable);
+
     /** 그 소스를 반영 소스로 쓰는 키워드. */
     List<Keyword> findByDataSourceId(Long dataSourceId);
 
@@ -67,13 +75,13 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
      */
     @Query(value = """
             select k from Keyword k join fetch k.keywordState join fetch k.dataSource
-            where k.country.id = :countryId
+            where k.merged = false and k.country.id = :countryId
               and (:anyState = true or k.keywordState.id in :stateIds)
               and (:anySource = true or k.dataSource.id in :sourceIds)
               and (:q is null or k.normalized like :q)""",
             countQuery = """
             select count(k) from Keyword k
-            where k.country.id = :countryId
+            where k.merged = false and k.country.id = :countryId
               and (:anyState = true or k.keywordState.id in :stateIds)
               and (:anySource = true or k.dataSource.id in :sourceIds)
               and (:q is null or k.normalized like :q)""")
@@ -86,7 +94,7 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
     /** 관리자 키워드 목록의 상태별 개수(상태 필터 없이, 소스·검색어만 적용). [상태 이름, 개수] */
     @Query("""
             select k.keywordState.name, count(k) from Keyword k
-            where k.country.id = :countryId
+            where k.merged = false and k.country.id = :countryId
               and (:anySource = true or k.dataSource.id in :sourceIds)
               and (:q is null or k.normalized like :q)
             group by k.keywordState.name""")
@@ -94,15 +102,15 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
                                         @Param("sourceIds") List<Long> sourceIds, @Param("q") String q);
 
     /** 그 나라의 한 상태 키워드의 번호·이름·유행도(봇이 가질 키워드 목록, 4.21). */
-    @Query("select k.id, k.text, k.trendValue from Keyword k where k.country.id = :countryId and k.keywordState.id = :stateId")
+    @Query("select k.id, k.text, k.trendValue from Keyword k where k.merged = false and k.country.id = :countryId and k.keywordState.id = :stateId")
     List<Object[]> findCatalogRows(@Param("countryId") Long countryId, @Param("stateId") Long stateId);
 
     /** 그 나라의 한 상태 키워드 번호(구슬 보상 추첨). */
-    @Query("select k.id from Keyword k where k.country.id = :countryId and k.keywordState.id = :stateId")
+    @Query("select k.id from Keyword k where k.merged = false and k.country.id = :countryId and k.keywordState.id = :stateId")
     List<Long> findIdsByCountryAndState(@Param("countryId") Long countryId, @Param("stateId") Long stateId);
 
     /** 시간별 기록 대상(9.9): 가진 사람이 있거나, 그 시간에 행이 바뀌었거나(+, 삭제, 잃기, 상태), 검색된 키워드. */
-    @Query("select k from Keyword k join fetch k.country where k.holderCount > 0 or k.updatedAt >= :since or k.id in :searched")
+    @Query("select k from Keyword k join fetch k.country where k.merged = false and (k.holderCount > 0 or k.updatedAt >= :since or k.id in :searched)")
     List<Keyword> findLogTargets(@Param("since") Instant since, @Param("searched") java.util.Collection<Long> searched);
 
     @Modifying
@@ -110,7 +118,7 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
     int addSearchCount(@Param("id") Long id, @Param("n") long n);
 
     /** 관리자 대시보드(13.11): 가진 사람이 많은 키워드(그 상태만), 가진 사람·트렌드 값 순. */
-    @Query("select k from Keyword k where k.country.id = :countryId and k.keywordState.id = :stateId order by k.holderCount desc, k.trendValue desc, k.id desc")
+    @Query("select k from Keyword k where k.merged = false and k.country.id = :countryId and k.keywordState.id = :stateId order by k.holderCount desc, k.trendValue desc, k.id desc")
     List<Keyword> topHeld(@Param("countryId") Long countryId, @Param("stateId") Long stateId, org.springframework.data.domain.Pageable pageable);
 
     long countByCountryIdAndCreatedAtGreaterThanEqual(Long countryId, Instant since);
@@ -123,7 +131,7 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
     @Query("""
             select k from Keyword k join fetch k.country c join fetch k.keywordState join fetch k.dataSource
             left join fetch k.aiComment
-            where c.code = :countryCode and k.normalized = :normalized""")
+            where c.code = :countryCode and k.normalized = :normalized and k.merged = false""")
     Optional<Keyword> findForPage(@Param("countryCode") String countryCode, @Param("normalized") String normalized);
 
     /** 공개 페이지가 캐시를 쓰더라도 금지 여부는 매 요청마다 새로 확인한다(4.28). 키워드 상태 번호만 읽는다. */
@@ -140,7 +148,7 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
     List<String> findNormalizedByCountryCodeAndState(@Param("countryCode") String countryCode, @Param("stateId") Long stateId);
 
     /** 사이트맵(4.28): 그 나라에서 활성 상태인 키워드의 [정규화 키, 수정 시각]. 최근에 만든 키워드부터(상한을 넘으면 오래된 것이 빠진다). */
-    @Query("select k.normalized, k.updatedAt from Keyword k where k.country.id = :countryId and k.keywordState.id = :activeId order by k.id desc")
+    @Query("select k.normalized, k.updatedAt from Keyword k where k.merged = false and k.country.id = :countryId and k.keywordState.id = :activeId order by k.id desc")
     List<Object[]> findSitemapRows(@Param("countryId") Long countryId, @Param("activeId") Long activeId,
                                    org.springframework.data.domain.Pageable pageable);
 }

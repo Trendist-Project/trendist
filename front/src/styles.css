@@ -73,7 +73,7 @@ input { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px soli
 /* 게임 화면 */
 .game-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; } /* 화면 높이를 넘겨 페이지 스크롤이 생기지 않게 */
 /* 가로 줄을 하나로 고정(minmax(0, 1fr))해서 아레나·검색 패널이 화면 높이를 정확히 나눠 쓴다. 줄을 자동 크기로 두면 영역을 숨기거나 줄일 때 캔버스 크기가 줄 높이를 밀어 올려 스크롤이 생기고 화면이 잘린다 */
-.game { display: grid; grid-template-columns: 1fr 340px; grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.game { display: grid; grid-template-columns: 1fr var(--side-w, 340px); grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .arena-wrap { min-height: 0; }
 /* 긴급 안내(4.29): 게임 맨 위 한 줄. 글자가 오른쪽에서 왼쪽으로 천천히 흐른다 */
 .emergency-bar { flex: none; display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 12px 0 0; overflow: hidden; z-index: 5;
@@ -208,7 +208,18 @@ kbd { font: inherit; font-size: 0.75rem; border: 1px solid var(--line); border-r
 .toast.hit-toast { top: 108px; background: #13281f; border-color: var(--accent); font-weight: 700; animation: hit-pop 0.35s ease-out; max-width: calc(100% - 32px); text-align: center; }
 @keyframes hit-pop { from { transform: translateX(-50%) scale(0.85); opacity: 0; } to { transform: translateX(-50%) scale(1); opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .toast.hit-toast { animation: none; } }
-.side { background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.side { background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; position: relative; }
+/* 패널 크기 조절 핸들: PC·서랍은 왼쪽 모서리(좌우), 모바일 시트는 위쪽 모서리(상하) */
+.side-resize { position: absolute; z-index: 3; touch-action: none; user-select: none; background: transparent; }
+.side-resize[aria-orientation="vertical"] { left: -5px; top: 0; bottom: 0; width: 10px; cursor: ew-resize; }
+.side-resize[aria-orientation="horizontal"] { left: 0; right: 0; top: -6px; height: 14px; cursor: ns-resize; }
+.side-resize::after { content: ''; position: absolute; border-radius: 3px; background: var(--line); opacity: 0; transition: opacity 0.15s; }
+.side-resize[aria-orientation="vertical"]::after { left: 3px; top: 50%; width: 4px; height: 44px; transform: translateY(-50%); }
+.side-resize[aria-orientation="horizontal"]::after { top: 5px; left: 50%; height: 4px; width: 44px; transform: translateX(-50%); }
+.side-resize:hover::after, .side-resize:focus-visible::after, .side-resize.dragging::after { opacity: 1; background: #7dd3fc; }
+.side-resize:focus-visible { outline: none; }
+body.side-resizing { user-select: none; -webkit-user-select: none; }
+body.side-resizing .arena { pointer-events: none; }
 .tabs { display: flex; border-bottom: 1px solid var(--line); }
 .tabs button { flex: 1 1 auto; min-width: 0; border: 0; border-radius: 0; background: transparent; padding: 12px 6px; font-size: 0.9rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* 보관함 글자와 개수는 PC에서도 한 줄로(글자 수에 맞춰 폭을 나눈다) */
 .tabs button.active { color: var(--text); box-shadow: inset 0 -3px 0 var(--accent); }
@@ -428,7 +439,7 @@ button.primary.danger { background: #e35d5d; border-color: #e35d5d; color: #fff;
   .side { position: fixed; left: 0; right: 0; bottom: 0; z-index: 12; border-left: 0; border-top: 1px solid var(--line); border-radius: 14px 14px 0 0; box-shadow: 0 -6px 20px rgba(0,0,0,0.35);
     padding-bottom: env(safe-area-inset-bottom); }
   .side:not(.expanded) { display: none; }
-  .side.expanded { height: clamp(220px, 34dvh, 340px); } /* 화면의 3분의 1쯤. 아레나를 덜 가린다 */
+  .side.expanded { height: var(--side-h, clamp(220px, 34dvh, 340px)); } /* 화면의 3분의 1쯤. 아레나를 덜 가린다 */
   .tabs button { padding: 10px 4px; white-space: nowrap; font-size: 0.85rem; } /* 보관함 글자와 개수는 한 줄로 */
   .tabs .sheet-toggle { display: block; flex: none; width: 52px; color: #c9d4e3; font-size: 1.05rem; }
   .tabs .side-hide, .side-show { display: none; } /* 모바일은 하단 시트라 숨기기 버튼이 필요 없다 */
@@ -1171,7 +1182,7 @@ button.link-back:hover { color: var(--text); }
   .chat:not(.collapsed), .arena-wrap.with-minimap .chat:not(.collapsed) { left: 50%; transform: translateX(-50%); width: min(340px, calc(100% - 200px)); }
   .target-card, .arena-wrap.with-minimap .target-card { left: 8px; top: 50px; }
   /* 오른쪽에서 나오는 서랍 */
-  .side { top: 0; left: auto; right: 0; bottom: 0; width: max(260px, 33.4vw); border-top: 0; border-left: 1px solid var(--line); border-radius: 14px 0 0 14px; box-shadow: -6px 0 20px rgba(0,0,0,0.35); padding-bottom: 0; }
+  .side { top: 0; left: auto; right: 0; bottom: 0; width: min(var(--side-w, max(260px, 33.4vw)), 70vw); border-top: 0; border-left: 1px solid var(--line); border-radius: 14px 0 0 14px; box-shadow: -6px 0 20px rgba(0,0,0,0.35); padding-bottom: 0; }
   .side.expanded { height: auto; }
 }
 
@@ -1869,8 +1880,9 @@ button.link-back:hover { color: var(--text); }
 /* 보관함 키워드 카드(4.42): 남은 시간 게이지 + 점수 등급(tier0~3)에 따른 왼쪽 띠·점수 칩·배경 */
 .mine-card { position: relative; }
 .mine-card::before { content: ''; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 3px; background: transparent; }
-.mine-card .mine-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; padding-right: 2px; }
-.mine-card .mine-card-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mine-card .mine-card-head { display: flex; align-items: center; flex-wrap: nowrap; gap: 2px 6px; min-width: 0; padding-right: 2px; }
+.mine-card .mine-card-head strong { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.25; }
+.mine-card .mine-card-head .badge, .mine-card .mine-card-head .mine-score { flex: none; }
 .mine-card .kw-time { font-size: 0.72rem; color: var(--muted); line-height: 1.3; }
 .mine-card .kw-gauge { height: 5px; border-radius: 3px; background: rgba(255,255,255,0.09); overflow: hidden; margin-top: 3px; }
 .mine-card .kw-gauge i { display: block; height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.6s; }
@@ -1926,3 +1938,230 @@ button.link-back:hover { color: var(--text); }
 .snd-test:disabled { opacity: 0.4; cursor: default; }
 .snd-note { margin: 10px 0 8px; }
 .snd-hint { margin: 0; }
+
+/* ---- 키워드 합성(4.44) ---- */
+.mine-card { user-select: none; -webkit-user-select: none; }
+.mine-card.tier4::before { width: 4px; background: linear-gradient(180deg, #d9a7ff, #7c5cff); }
+.mine-card.tier4 { background: linear-gradient(90deg, rgba(160,110,255,0.2), rgba(124,92,255,0.05) 55%, transparent); box-shadow: inset 0 0 0 1px rgba(190,150,255,0.3); }
+.mine-card.tier4 .mine-card-head strong { color: #f1e6ff; }
+.mine-card.tier4 .mine-score { background: linear-gradient(135deg, #d9a7ff, #8f6bff); color: #1d0a3a; }
+.merge-star, .merge-badge { color: #ffd166; font-weight: 800; letter-spacing: 1px; white-space: nowrap; }
+.mine-card .merge-star { font-size: 0.8rem; flex: none; }
+.pi-kw-text .merge-star { margin-right: 4px; }
+.mine-card .merge-link { position: absolute; right: 30px; bottom: 17px; width: 26px; height: 26px; padding: 0; border-radius: 8px; font-size: 0.95rem; line-height: 1; background: rgba(255,255,255,0.06); }
+.mine-card .merge-link:disabled { opacity: 0.35; cursor: not-allowed; }
+.mine-card .merge-link[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); }
+.mine-card button.mine-open { padding-right: 64px; }
+.merge-banner { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; margin-bottom: 8px; border-radius: 10px; border: 1px solid var(--accent); background: rgba(63,182,139,0.12); font-size: 0.85rem; }
+.merge-drag-hint { margin: 8px 2px 0; }
+@media (pointer: coarse) { .merge-drag-hint { display: none; } }
+.list.merge-active .merge-source { outline: 2px solid var(--accent); outline-offset: -1px; }
+.list.merge-active .merge-ok { box-shadow: inset 0 0 0 2px rgba(63,182,139,0.7); }
+.list.merge-active .merge-bad button.mine-open { opacity: 0.4; }
+.list.merge-active .merge-bad { cursor: not-allowed; }
+.mine-card.merge-over.merge-ok { box-shadow: inset 0 0 0 3px #ffd166, 0 0 14px rgba(255,209,102,0.45); }
+.mine-card.merge-over.merge-bad { outline: 2px dashed #ef5a5a; outline-offset: -2px; }
+.merge-ghost { position: fixed; z-index: 3000; pointer-events: none; padding: 6px 12px; border-radius: 999px; background: var(--accent); color: #062014; font-weight: 700; font-size: 0.85rem; box-shadow: 0 6px 18px rgba(0,0,0,0.45); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 합쳐지는 연출: 두 카드가 가운데로 모이며 빛난다. 새 카드는 튀어 오른다(보너스는 황금빛) */
+.mine-card.merging { animation: merge-in 0.11s ease-in forwards; }
+.mine-card.merging.bonus { animation-name: merge-in-bonus; }
+.mine-card.merge-fresh { animation: merge-pop 0.14s cubic-bezier(.2,1.4,.4,1); }
+.mine-card.merge-fresh.bonus { animation: merge-pop 0.14s cubic-bezier(.2,1.4,.4,1), merge-gold 0.5s ease-out; }
+@keyframes merge-in { 0% { transform: none; opacity: 1; } 60% { transform: scale(0.96); box-shadow: 0 0 0 3px rgba(255,209,102,0.8); } 100% { transform: scale(0.85); opacity: 0.2; box-shadow: 0 0 22px rgba(255,255,255,0.9); } }
+@keyframes merge-in-bonus { 0% { opacity: 1; } 60% { transform: scale(0.96); box-shadow: 0 0 0 3px rgba(255,209,102,0.9); } 100% { transform: scale(0.85); opacity: 0.2; box-shadow: 0 0 26px rgba(255,209,102,1); } }
+@keyframes merge-pop { 0% { transform: scale(0.8); opacity: 0.3; } 100% { transform: none; opacity: 1; } }
+@keyframes merge-gold { 0% { box-shadow: 0 0 0 4px rgba(255,209,102,1), 0 0 30px rgba(255,209,102,0.9); } 100% { box-shadow: 0 0 0 0 rgba(255,209,102,0); } }
+@keyframes merge-flash { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,0); } 40% { box-shadow: inset 0 0 0 3px rgba(255,255,255,0.9); } 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); } }
+@media (prefers-reduced-motion: reduce) {
+  .mine-card.merging, .mine-card.merging.bonus { animation: merge-flash 0.15s linear forwards; }
+  .mine-card.merge-fresh, .mine-card.merge-fresh.bonus { animation: merge-flash 0.25s linear; }
+  .mine-card.merge-fresh.bonus { box-shadow: inset 0 0 0 2px #ffd166; }
+}
+/* 미리보기 창 */
+.merge-dialog { width: min(460px, 100%); }
+.merge-ingredients { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
+.merge-plus { color: var(--muted); font-weight: 800; }
+.merge-result { display: flex; align-items: baseline; justify-content: center; gap: 8px; padding: 12px; border-radius: 12px; background: rgba(255,209,102,0.08); border: 1px solid rgba(255,209,102,0.3); }
+.merge-result strong { font-size: 1.4rem; overflow-wrap: anywhere; }
+.merge-stars { color: #ffd166; font-weight: 800; }
+.merge-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; }
+.merge-facts div { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #0f151f; }
+.merge-facts .wide { grid-column: 1 / -1; }
+.merge-facts .bonus { border-color: rgba(255,209,102,0.5); background: rgba(255,209,102,0.07); }
+.merge-facts dt { font-size: 0.75rem; color: var(--muted); }
+.merge-facts dd { margin: 2px 0 0; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.merge-reason { margin: 0; padding: 10px 12px; border-radius: 10px; background: rgba(239,90,90,0.1); border: 1px solid rgba(239,90,90,0.4); }
+.merge-actions { display: flex; justify-content: flex-end; gap: 8px; }
+/* 합성 키워드 상세 창 */
+.merged-formula { margin: 4px 0 0; overflow-wrap: anywhere; }
+.merged-stats { grid-template-columns: 1fr 1fr; }
+.merged-part-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.merged-part { border: 1px solid var(--line); border-radius: 12px; background: #0f151f; }
+.merged-part.inactive { opacity: 0.85; }
+.merged-part-toggle { width: 100%; display: flex; align-items: center; gap: 8px; border: 0; background: transparent; text-align: left; padding: 10px 12px; flex-wrap: wrap; }
+.merged-part-caret { margin-left: auto; color: var(--muted); }
+.merged-part-body { padding: 0 12px 12px; display: grid; gap: 6px; }
+.merged-part-ai, .merged-part-body p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.merged-part-note { color: var(--warn); font-size: 0.82rem; }
+.merged-part-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.merged-part-detail { margin-top: 6px; padding-top: 10px; border-top: 1px dashed var(--line); display: grid; gap: 12px; }
+
+/* 합성 모드 끝내기: 글자 대신 사선을 그은 합성 아이콘 */
+.merge-exit { position: relative; flex: none; width: 30px; height: 30px; padding: 0; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.06); font-size: 0.95rem; line-height: 1; cursor: pointer; }
+.merge-exit span { opacity: 0.6; }
+.merge-exit::after { content: ''; position: absolute; left: 5px; right: 5px; top: 50%; height: 2px; margin-top: -1px; border-radius: 2px; background: #ef5a5a; transform: rotate(-45deg); }
+.merge-exit:hover, .merge-exit:focus-visible { background: rgba(239,90,90,0.18); border-color: #ef5a5a; }
+
+/* 보관함 카드 3줄 배치: ① 별(있는 그대로, 비활성은 💤) … 점수 ② 이름(한 줄) … [🔗] ③ 게이지 … 남은 시간(두 자리 + 단위) */
+.mine-card button.mine-open { display: grid; gap: 3px; padding: 8px 10px 9px; }
+.mine-card .mine-row1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.mine-card .mine-stars { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: clip; font-size: 0.8rem; letter-spacing: 1px; line-height: 1.3; color: #ffd166; }
+.mine-card:not(.merged) .mine-stars { color: #d9b86a; }
+.mine-card .mine-row1 .mine-score { margin-left: 0; }
+.mine-card .mine-name { min-width: 0; padding-right: 34px; }
+.mine-card .mine-name strong { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.3; }
+.mine-card.tier3 .mine-name strong { color: #fff3d6; }
+.mine-card.tier4 .mine-name strong { color: #f1e6ff; }
+.mine-card .mine-row3 { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.mine-card .mine-row3 .kw-gauge { flex: 1 1 auto; margin-top: 0; }
+.mine-card .kw-left { flex: none; font-size: 0.72rem; line-height: 1; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mine-card .kw-left.warn { color: #ff8a8a; }
+.mine-card .merge-link { top: 30px; bottom: auto; right: 8px; width: 24px; height: 24px; font-size: 0.85rem; }
+.mine-card .mine-stars { position: relative; flex: 1 1 auto; }
+.mine-card .mine-stars-measure { position: absolute; left: 0; top: 0; visibility: hidden; white-space: nowrap; pointer-events: none; }
+
+/* 모바일 세로: 키워드 상세·합성 상세 창이 잘리지 않게(좁은 폭에서 한 줄로 몰린 요소를 줄바꿈·축소한다) */
+@media (max-width: 760px) {
+  .modal-head { gap: 8px; padding: 12px 14px; }
+  .modal-title { flex: 1 1 auto; min-width: 0; }
+  .modal-title h2, .keyword-modal .modal-head h2 { min-width: 0; font-size: 1.12rem; }
+  .kw-title-actions { gap: 4px; }
+  .kw-share { padding: 4px 8px; font-size: 0.78rem; white-space: nowrap; }
+  .modal-body { overflow-x: hidden; }
+  .modal-body > * { min-width: 0; }
+  .kw-hero { flex-wrap: wrap; gap: 10px 12px; }
+  .kw-hero-main { min-width: 0; flex: 1 1 140px; }
+  .kw-score { flex-wrap: wrap; }
+  .kw-score strong { font-size: clamp(1.6rem, 9vw, 2rem); overflow-wrap: anywhere; }
+  .kw-hero-side { min-width: 0; flex: 0 1 auto; }
+  .kw-stats div { min-width: 0; padding: 8px 10px; }
+  .kw-stats dd { overflow-wrap: anywhere; }
+  .kw-activity { padding: 10px 10px; }
+  .kw-activity-head { row-gap: 6px; }
+  .chip-row { flex-wrap: wrap; }
+  .merged-part-toggle { padding: 8px 10px; }
+  .merged-part-body { padding: 0 10px 10px; }
+}
+@media (max-width: 420px) {
+  .kw-hero-side { flex: 1 1 100%; justify-items: stretch; }
+  .kw-plus { width: 100%; padding: 10px 14px; }
+  .kw-hero-side .muted { text-align: center; }
+  .kw-stats { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .kw-title-actions .kw-share { padding: 4px 7px; }
+}
+
+/* [🔗] 버튼: 끌어서 합치기 손잡이(터치도 가능). 합성 모드에서 출발 카드의 버튼은 사선 그은 아이콘(= 합성 모드 끝내기)으로 바뀐다 */
+.mine-card .merge-link { touch-action: none; cursor: grab; user-select: none; }
+.mine-card .merge-link:active { cursor: grabbing; }
+.mine-card .merge-link.cancel { background: rgba(239,90,90,0.16); border-color: #ef5a5a; }
+.mine-card .merge-link.cancel span { opacity: 0.65; }
+.mine-card .merge-link.cancel::after { content: ''; position: absolute; left: 4px; right: 4px; top: 50%; height: 2px; margin-top: -1px; border-radius: 2px; background: #ef5a5a; transform: rotate(-45deg); pointer-events: none; }
+@media (pointer: coarse) { .merge-drag-hint { display: block; } }
+
+/* 보관함 카드 등급 테두리(메이플 아이템 등급 순서): 노멀(회색) → 레어(파랑) → 에픽(보라) → 유니크(노랑) → 레전드리(초록). 기준은 키워드 점수 15·30·50·100점 */
+.mine-card { --grade: #566176; border: 1.5px solid var(--grade); border-radius: 10px; }
+.mine-card::before { display: none; }
+.mine-card.tier1 { --grade: #4aa8ff; }
+.mine-card.tier2 { --grade: #b36bff; }
+.mine-card.tier3 { --grade: #ffc93c; }
+.mine-card.tier4 { --grade: #3be07a; }
+.mine-card.tier1, .mine-card.tier2, .mine-card.tier3, .mine-card.tier4 { background: linear-gradient(90deg, color-mix(in srgb, var(--grade) 14%, transparent), transparent 70%); box-shadow: none; }
+.mine-card.tier3, .mine-card.tier4 { box-shadow: 0 0 10px color-mix(in srgb, var(--grade) 38%, transparent); }
+.mine-card.tier1 .mine-score, .mine-card.tier2 .mine-score, .mine-card.tier3 .mine-score, .mine-card.tier4 .mine-score {
+  background: color-mix(in srgb, var(--grade) 24%, transparent); color: color-mix(in srgb, var(--grade) 55%, #fff); border: 1px solid color-mix(in srgb, var(--grade) 55%, transparent); }
+.mine-card.tier3 .mine-name strong, .mine-card.tier4 .mine-name strong { color: var(--text); }
+
+/* 정렬 칩: 한 줄로만 보이고, 칸이 모자라면 줄바꿈 대신 옆으로 민다(터치·마우스 휠·마우스 끌기). 더 볼 쪽에 옅은 그림자 */
+.sort-chips.scroll-row { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; scrollbar-width: none; cursor: grab; touch-action: pan-x; }
+.sort-chips.scroll-row::-webkit-scrollbar { display: none; }
+.sort-chips.scroll-row .sort-chip { flex: none; white-space: nowrap; }
+.scroll-row.more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent); }
+.scroll-row.more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 22px), transparent); }
+.scroll-row.more-left.more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 22px, #000 calc(100% - 22px), transparent); mask-image: linear-gradient(to right, transparent, #000 22px, #000 calc(100% - 22px), transparent); }
+
+/* 등급 테두리: 일반 목록 스타일(.list li의 1px 회색 테두리)보다 우선하도록 선택자를 올렸다. 눈에 거슬리지 않게 채도를 낮추고 빛은 높은 등급에서만 은은하게. 5단계 위에 빨강(신화) */
+.list li.mine-card { --grade: #6a768b; border: 2px solid var(--grade); border-radius: 10px; }
+.list li.mine-card.tier1 { --grade: #4a98e8; }
+.list li.mine-card.tier2 { --grade: #a266e6; }
+.list li.mine-card.tier3 { --grade: #e0b43a; }
+.list li.mine-card.tier4 { --grade: #3ec27c; }
+.list li.mine-card.tier5 { --grade: #e45f5f; }
+.list li.mine-card.tier1, .list li.mine-card.tier2, .list li.mine-card.tier3, .list li.mine-card.tier4, .list li.mine-card.tier5 {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--grade) 30%, var(--panel)), color-mix(in srgb, var(--grade) 12%, var(--panel)) 75%); box-shadow: none; } /* 투명하지 않게 패널 색과 섞은 불투명 배경 */
+.list li.mine-card.tier3, .list li.mine-card.tier4 { box-shadow: 0 0 8px color-mix(in srgb, var(--grade) 32%, transparent); }
+.list li.mine-card.tier5 { box-shadow: 0 0 10px color-mix(in srgb, var(--grade) 40%, transparent); }
+.mine-card.tier5 .mine-score { background: color-mix(in srgb, var(--grade) 22%, transparent); color: color-mix(in srgb, var(--grade) 45%, #fff); border: 1px solid color-mix(in srgb, var(--grade) 50%, transparent); }
+.mine-card.tier5 .mine-name strong { color: var(--text); }
+
+/* 보관함 카드 오른쪽 끝의 합성 전용 영역: 카드 높이와 같은 정사각형 손잡이. 누르면 합성 모드, 끌면 다른 카드 위에 놓아 합친다(카드 본문 끌기도 그대로) */
+.list li.mine-card { --mine-in: 76px; display: grid; grid-template-columns: minmax(0, 1fr) auto; overflow: hidden; }
+.list li.mine-card button.mine-open { height: var(--mine-in); padding: 6px 10px 7px; gap: 2px; align-content: center; }
+.mine-card .mine-name { padding-right: 0; }
+.list li.mine-card > button.merge-link { position: relative; right: auto; top: auto; bottom: auto; width: var(--mine-in); height: var(--mine-in); margin: 0; padding: 0;
+  border: 0; border-left: 1px solid color-mix(in srgb, var(--grade) 55%, transparent); border-radius: 0; background: color-mix(in srgb, var(--grade) 14%, #0e141d);
+  font-size: 1.55rem; line-height: 1; display: grid; place-items: center; }
+.list li.mine-card > button.merge-link:hover:not(:disabled), .list li.mine-card > button.merge-link:focus-visible { background: color-mix(in srgb, var(--grade) 28%, #0e141d); }
+.list li.mine-card > button.merge-link:disabled { opacity: 0.35; }
+.list li.mine-card > button.merge-link.cancel { background: rgba(239,90,90,0.2); }
+.list li.mine-card > button.merge-link.cancel::after { left: 14px; right: 14px; }
+
+/* 합칠 수 없는 카드: 늘어나지 않고 카드 위를 회색 금지선 무늬로 덮는다. 이유 글은 가리키거나 끌어다 놓았을 때(터치 기기는 항상) 보인다 */
+.mine-card .merge-block { position: absolute; inset: 0; z-index: 3; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; border-radius: 8px; pointer-events: none;
+  background: repeating-linear-gradient(-45deg, rgba(58,64,77,0.86) 0 9px, rgba(72,79,94,0.86) 9px 18px); color: #e9eef6; text-align: center; font-size: 0.8rem; font-weight: 700; line-height: 1.3; }
+.mine-card .merge-block-icon { font-size: 1.3rem; line-height: 1; flex: none; opacity: 0.9; }
+.mine-card .merge-block-text { display: none; max-width: 100%; text-shadow: 0 1px 2px rgba(0,0,0,0.6); overflow-wrap: anywhere; }
+.mine-card:hover .merge-block-text, .mine-card.merge-over .merge-block-text, .mine-card:focus-within .merge-block-text { display: block; }
+.mine-card.merge-over .merge-block { background: repeating-linear-gradient(-45deg, rgba(110,52,52,0.88) 0 9px, rgba(128,62,62,0.88) 9px 18px); }
+@media (hover: none) { .mine-card .merge-block-text { display: block; } }
+.list.merge-active .merge-bad { filter: grayscale(0.85); }
+
+/* 합칠 카드를 가리키는 표시가 오른쪽 합성 영역에 가려지지 않게: 안쪽 그림자(자식 요소 아래에 깔림) 대신 카드 전체 위에 테두리 막을 덮는다 */
+.list li.mine-card.merge-over.merge-ok, .list.merge-active li.mine-card.merge-ok { box-shadow: none; }
+.list.merge-active li.mine-card.merge-ok::after, .list li.mine-card.merge-over.merge-ok::after { content: ''; position: absolute; inset: 0; z-index: 4; pointer-events: none; border-radius: 8px; border: 2px solid var(--accent); }
+.list li.mine-card.merge-over.merge-ok::after { border: 3px solid #ffd166; box-shadow: 0 0 14px rgba(255,209,102,0.5); }
+
+/* 키워드 상세 요약 오른쪽: [추가]/[보유중] 버튼은 작고 단정하게, 남은 시간은 보관함 카드처럼 게이지 + 두 자리 숫자·단위로 */
+.kw-hero-side { gap: 8px; min-width: 150px; }
+.kw-plus { font-size: 0.92rem; line-height: 1.2; padding: 6px 18px; border-radius: 10px; font-weight: 700; }
+.kw-plus.held { background: rgba(63,182,139,0.12); border: 1px solid rgba(63,182,139,0.5); color: #bff0dc; }
+.kw-hold { width: 100%; display: flex; align-items: center; gap: 8px; }
+.kw-hold-gauge { flex: 1 1 auto; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.09); overflow: hidden; }
+.kw-hold-gauge i { display: block; height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.6s; }
+.kw-hold.mid .kw-hold-gauge i { background: #f0a73a; }
+.kw-hold.urgent .kw-hold-gauge i { background: #ef5a5a; }
+.kw-hold-left { flex: none; font-size: 0.72rem; line-height: 1; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kw-hold-left.warn { color: #ff8a8a; }
+@media (max-width: 420px) {
+  .kw-plus { width: auto; padding: 6px 16px; justify-self: end; }
+  .kw-hero-side .kw-hold { justify-self: stretch; }
+}
+
+/* 합성 성공 카드(구슬 결과와 같은 보상 카드): 별을 크게, 합성 이름, 얻은 점수. 보너스는 황금빛이 더 강하고 덤으로 붙은 키워드를 알려 준다 */
+.orb-reveal.merge-reveal { border-color: #ffc84a; }
+.merge-reveal .merge-reveal-stars { margin: 4px 0 0; font-size: 1.35rem; line-height: 1.1; letter-spacing: 4px; color: #ffd166; text-shadow: 0 0 10px rgba(255,200,74,0.7); }
+.merge-reveal .orb-keyword { margin: 4px 0 2px; }
+.merge-reveal .orb-keyword strong { font-size: 1.3rem; background: linear-gradient(90deg, #fff3d6, #ffd166); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.merge-reveal .orb-gain { font-size: 1.15rem; }
+.merge-reveal .merge-reveal-bonus { margin-top: 6px; padding: 4px 10px; border-radius: 999px; background: rgba(255,200,74,0.16); border: 1px solid rgba(255,200,74,0.55); color: #ffe39a; font-weight: 800; font-size: 0.85rem; }
+.orb-reveal.merge-reveal.bonus { box-shadow: 0 0 36px rgba(255,200,74,0.7); background: linear-gradient(180deg, rgba(86,60,6,0.96), rgba(20,27,38,0.95)); }
+.notify-stack > .orb-reveal.merge-reveal { min-width: 200px; max-width: min(300px, 100%); }
+
+/* 키워드 상세 요약 오른쪽: 남은 시간 게이지 · 남은 시간 · [보유중]/[추가] 버튼을 한 줄에 */
+.kw-hero-side { display: flex; flex-direction: row; align-items: center; justify-content: flex-end; gap: 10px; flex: 1 1 auto; min-width: 0; }
+.kw-hero-side .kw-hold { width: auto; flex: 1 1 auto; min-width: 96px; max-width: 240px; }
+.kw-hero-side .kw-plus { flex: none; white-space: nowrap; }
+@media (max-width: 420px) {
+  .kw-hero-side { flex: 1 1 100%; }
+  .kw-hero-side .kw-hold { max-width: none; }
+  .kw-hero-side .kw-plus { width: auto; }
+}

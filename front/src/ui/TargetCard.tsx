@@ -28,7 +28,7 @@ export function TargetCard({ entityNo, following, touchKey, read, onClose, onDet
   read: (e: number) => Info | null;
   onClose(): void;
   onDetail(): void;
-  onOpenKeyword(id: number): void;
+  onOpenKeyword(id: number, merged?: boolean): void;
 }) {
   const [info, setInfo] = useState<Info | null>(() => read(entityNo));
   const [keywords, setKeywords] = useState<KeywordTag[] | null>(null);
@@ -130,8 +130,8 @@ export function TargetCard({ entityNo, following, touchKey, read, onClose, onDet
       {!bot && keywords && keywords.length > 0 && (
         <div className="tc-tags">
           {keywords.map((k) => (
-            <button key={k.keywordId} onClick={() => onOpenKeyword(k.keywordId)} aria-label={t('player.detailAria', { text: k.text })}>
-              <i aria-hidden="true">#</i>{k.text}
+            <button key={k.keywordId} onClick={() => onOpenKeyword(k.keywordId, k.merged)} aria-label={t('player.detailAria', { text: k.text })}>
+              <i aria-hidden="true">{k.merged || k.state === '활성' ? '★' : '#'}</i>{k.text}
             </button>
           ))}
         </div>

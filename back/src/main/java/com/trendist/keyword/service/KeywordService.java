@@ -23,6 +23,15 @@ public interface KeywordService {
      */
     KeywordDtos.KeywordCard detail(long userId, long keywordId, String ip, String userAgent);
 
+    /** 합성 미리보기(4.44): 두 보관함 키워드를 합치면 어떻게 되는지. 합칠 수 없으면 ok=false와 이유. 확률 결과는 알려 주지 않는다. */
+    KeywordDtos.MergePreview mergePreview(long userId, long firstId, long secondId);
+
+    /** 합성(4.44): 🔥활성 보관함 키워드 둘을 합쳐 ★ 합성 키워드 하나로 바꾼다. 일정 확률로 +1성 보너스가 붙는다. */
+    KeywordDtos.MergeResult merge(long userId, long firstId, long secondId);
+
+    /** 합성 키워드 상세 창(4.44): 구성 원본 키워드 카드를 한 번에. 내 나라의 합성 키워드면 누구의 것이든 볼 수 있다. */
+    KeywordDtos.MergedDetail mergedDetail(long userId, long keywordId);
+
     /** 방 입장 때 보유 색인에 넣을 키워드 번호(만료 전, 금지 아님). */
     List<Long> activeKeywordIds(long playerId);
 

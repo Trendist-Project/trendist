@@ -20,6 +20,7 @@ public class KeywordController {
     private final KeywordService service;
     private final KeywordActivityService activityService;
     private final AiCommentService aiComments;
+    private final com.trendist.keyword.service.KeywordGradeService gradeService;
 
     @GetMapping("/keywords/search")
     public KeywordDtos.SearchResult search(@AuthenticationPrincipal AuthUser user, @RequestParam String q) {
@@ -30,6 +31,10 @@ public class KeywordController {
     public KeywordDtos.PlusResult plus(@AuthenticationPrincipal AuthUser user, @Valid @RequestBody KeywordDtos.PlusRequest req) {
         return service.plus(user.userId(), req.text());
     }
+
+    /** 보관함 카드 등급 기준(4.42). */
+    @GetMapping("/keywords/grades")
+    public KeywordDtos.GradeInfo grades() { return gradeService.grades(); }
 
     @GetMapping("/keywords/{id}")
     public KeywordDtos.KeywordCard detail(@AuthenticationPrincipal AuthUser user, @PathVariable long id, HttpServletRequest req) {
@@ -47,6 +52,28 @@ public class KeywordController {
     @PostMapping("/keywords/{id}/ai-comment/request")
     public void requestAiComment(@AuthenticationPrincipal AuthUser user, @PathVariable long id) {
         aiComments.request(user.userId(), id);
+    }
+
+    /** 합성 미리보기·합성·합성 키워드 상세(4.44). */
+    @GetMapping("/me/keywords/merge-preview")
+    public KeywordDtos.MergePreview mergePreview(@AuthenticationPrincipal AuthUser user, @RequestParam long a, @RequestParam long b) {
+        return service.mergePreview(user.userId(), a, b);
+    }
+
+    @PostMapping("/me/keywords/merge")
+    public KeywordDtos.MergeResult merge(@AuthenticationPrincipal AuthUser user, @Valid @RequestBody KeywordDtos.MergeRequest req) {
+        return service.merge(user.userId(), req.first(), req.second());
+    }
+
+    @GetMapping("/keywords/merged/{id}")
+    public KeywordDtos.MergedDetail mergedDetail(@AuthenticationPrincipal AuthUser user, @PathVariable long id) {
+        return service.mergedDetail(user.userId(), id);
+    }
+
+    @GetMapping("/keywords/merged/{id}/activity")
+    public KeywordDtos.Activity mergedActivity(@AuthenticationPrincipal AuthUser user, @PathVariable long id,
+                                               @RequestParam(defaultValue = "24h") String range) {
+        return activityService.mergedActivity(user.userId(), id, range);
     }
 
     @GetMapping("/me/keywords")

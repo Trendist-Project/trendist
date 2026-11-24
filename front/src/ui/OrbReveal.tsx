@@ -9,7 +9,9 @@ export const ORB_REVEAL_MS = 3000;
 export type RevealKind = 'GAIN' | 'LOSE' | 'STEAL' | 'STOLEN';
 /** wipe는 🔥 불꽃으로 키워드를 모두 날린(GAINED) 또는 모두 잃은(LOST) 개수. 키워드를 빼앗거나 빼앗긴 것이 아니라 표시(kind)는 없다 */
 /** lostCount는 독 스택으로 한 번에 여러 개를 잃었을 때의 개수(2개 이상이면 개수만 크게 보여 주고 어떤 키워드인지는 보여 주지 않는다) */
-export type RevealResult = OrbResult & { kind?: RevealKind; who?: string; wipe?: number; kill?: string; lostCount?: number; lostLabel?: string };
+export type RevealResult = OrbResult & { kind?: RevealKind; who?: string; wipe?: number; kill?: string; lostCount?: number; lostLabel?: string; merge?: MergeReveal };
+/** 키워드 합성 결과(4.44): 성(★ 개수), +1성 보너스 여부와 덤으로 붙은 키워드 이름 */
+export type MergeReveal = { stars: number; bonus: boolean; bonusText?: string };
 const TAG_KEY: Record<RevealKind, string> = { GAIN: 'gamescreen.tagGain', LOSE: 'gamescreen.tagLose', STEAL: 'gamescreen.tagSteal', STOLEN: 'gamescreen.tagStolen' };
 
 function Tag({ kind }: { kind?: RevealKind }) {
@@ -18,6 +20,19 @@ function Tag({ kind }: { kind?: RevealKind }) {
 
 /** ? 구슬에서 나온 키워드를 3초 동안 보여 준다(4.20). 잃으면 어떤 키워드를 잃었는지 보여 주고, 잃을 것도 없으면 꽝이고, 이미 가진 키워드면 갱신했다고 알린다. */
 export function OrbReveal({ result }: { result: RevealResult }) {
+  if (result.merge) { // 합성 성공: 별·합성 이름·얻은 점수를 한 장에(보너스면 황금빛과 덤으로 붙은 키워드를 더 보여 준다)
+    const m = result.merge;
+    return (
+      <div className={m.bonus ? 'orb-reveal merge-reveal bonus' : 'orb-reveal merge-reveal'} role="status" aria-live="polite">
+        <p className="orb-title">{t(m.bonus ? 'merge.revealBonusTitle' : 'merge.revealTitle')}</p>
+        <p className="merge-reveal-stars" aria-label={t('merge.starsAria', { n: m.stars })}>{'★'.repeat(Math.min(m.stars, 8))}{m.stars > 8 ? `×${m.stars}` : ''}</p>
+        <p className="orb-keyword"><strong title={result.text}>{result.text}</strong></p>
+        <p className="orb-meta">{!!result.gained && <span className="orb-gain">{t('gamescreen.orbGain', { n: result.gained })}</span>}</p>
+        {m.bonus && m.bonusText && <p className="merge-reveal-bonus">{t('merge.revealBonus', { name: m.bonusText })}</p>}
+        <span className="orb-timer" style={{ animationDuration: `${ORB_REVEAL_MS}ms` }} />
+      </div>
+    );
+  }
   if (result.kill !== undefined) { // 처치: 키워드가 없는 상대를 쓰러뜨렸다(4.31). 상대 이름이 둘째 줄
     return (
       <div className="orb-reveal" role="status" aria-live="polite">
