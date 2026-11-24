@@ -1,3 +1,4 @@
+import { Select } from '../ui/Select';
 import { useRef, useState, type KeyboardEvent } from 'react';
 import { EMBED_NAMES } from '../ui/RichText';
 import { SKILL_DEFS } from '../game/skills';
@@ -112,16 +113,13 @@ export function MarkupEditor({ value, onChange, placeholder, rows = 14, embeds =
           <button key={title} type="button" className={cls} title={title} aria-label={title} onMouseDown={(e) => e.preventDefault()} onClick={act}>{label}</button>
         ))}
         {embeds && (
-          <select className="markup-embed" value="" aria-label="게임 그림 넣기" onChange={(e) => { if (e.target.value) block(e.target.value); }}>
-            <option value="">🖼 그림 넣기</option>
-            {EMBED_NAMES.map((n) => <option key={n} value={n}>{n.slice(2, -2)}</option>)}
-          </select>
+          <Select<string> size="sm" className="markup-embed" aria-label="게임 그림 넣기" value={null} placeholder="🖼 그림 넣기" menuWidth="auto"
+                          options={EMBED_NAMES.map((n) => ({ value: n, label: n.slice(2, -2) }))} onChange={(v) => block(v)} />
         )}
         {embeds && (
-          <select className="markup-embed" value="" aria-label="스킬 아이콘 넣기" onChange={(e) => { if (e.target.value) { const ta = ref.current; if (ta) replace(ta.selectionStart, ta.selectionEnd, `[[아이콘 ${e.target.value}]]`); } }}>
-            <option value="">🧩 스킬 아이콘 넣기</option>
-            {SKILL_DEFS.map((d) => <option key={d.code} value={d.code}>{skillNameKo(d.code)}</option>)}
-          </select>
+          <Select<string> size="sm" className="markup-embed" aria-label="스킬 아이콘 넣기" value={null} placeholder="🧩 스킬 아이콘 넣기" menuWidth="auto"
+                          options={SKILL_DEFS.map((d) => ({ value: d.code, label: skillNameKo(d.code) }))}
+                          onChange={(v) => { const ta = ref.current; if (ta) replace(ta.selectionStart, ta.selectionEnd, `[[아이콘 ${v}]]`); }} />
         )}
         <span className="markup-spacer" />
         <button type="button" className={help ? 'on' : undefined} onClick={() => setHelp((v) => !v)} aria-expanded={help} title="문법 도움말">?</button>

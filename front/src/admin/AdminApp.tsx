@@ -3,7 +3,7 @@ import {
   adminApi, resumeSession,
   type AdminReport, type SanctionKind, type AdminNotice, type AdminNoticeInput, type AdminReportPage, type AdminSetting, type AdminSkill, type AdminShareStats, type AdminStatus,
 } from '../api/client';
-import { ADMIN_COUNTRIES, getAdminCountry, setAdminCountry, type AdminCountry } from '../api/adminCountry';
+import { ADMIN_COUNTRIES, getAdminCountry, setAdminCountry } from '../api/adminCountry';
 import { RichText } from '../ui/RichText';
 import { categoryNameKo, skillNameKo } from '../ui/skillMeta';
 import { GuidesTab } from './GuidesTab';
@@ -19,6 +19,8 @@ import { UsersTab } from './UsersTab';
 import { MonstersTab } from './MonstersTab';
 import { ConfigChangesTab } from './ConfigChangesTab';
 import { ThemeTab } from './ThemeTab';
+import { ALL_ITEMS, Icon, isTab, NAV, type Tab } from './AdminNav';
+import { Select } from '../ui/Select';
 import { MarkupEditor } from './MarkupEditor';
 import { confirmToast, successToast } from '../ui/toast';
 import { adminConfirm, errMsg, fmt } from './format';
@@ -29,22 +31,24 @@ import { SkillHover, SkillOverview } from './SkillMotionHover';
  * 관리자 페이지(13절, /admin/). 게임과 따로 열고, 로그인한 계정(갱신 토큰)으로 들어온다.
  * 서버가 /api/admin/**를 ROLE_ADMIN(users.role = ADMIN)만 받는다. 권한이 없으면 접근할 수 없다는 문구만 보여 준다.
  */
-type Tab = 'dashboard' | 'stats' | 'spectate' | 'users' | 'keywords' | 'ai' | 'add' | 'reports' | 'notices' | 'emergency' | 'guides' | 'share' | 'integrations' | 'skills' | 'monsters' | 'changes' | 'theme' | 'settings';
-const TABS: [Tab, string][] = [['dashboard', '대시보드'], ['stats', '통계'], ['spectate', '관전'], ['users', '사용자'], ['keywords', '키워드'], ['ai', 'AI 설명'], ['add', '일괄 추가·금지'], ['reports', '신고'], ['notices', '공지'], ['emergency', '긴급 안내'], ['guides', '가이드'], ['share', '공유'], ['integrations', '연동'], ['skills', '스킬'], ['monsters', '몬스터'], ['theme', '배경·날씨'], ['settings', '설정'], ['changes', '변경 이력']];
-
 
 export function AdminApp() {
   const [status, setStatus] = useState<AdminStatus | null | 'nologin'>(null);
-  const [tab, setTabState] = useState<Tab>('dashboard');
+  // 지금 탭은 주소의 #해시에 둔다: 새로고침해도 그 화면에 머물고 뒤로 가기·링크 공유가 된다
+  const fromHash = (): Tab => { const h = location.hash.replace(/^#\/?/, ''); return isTab(h) ? h : 'dashboard'; };
+  const [tab, setTabState] = useState<Tab>(fromHash);
+  const [navOpen, setNavOpen] = useState(false); // 좁은 화면의 메뉴 서랍
   const country = getAdminCountry(); // 바꾸면 새로 읽어 모든 탭이 같은 나라를 본다
   // 대시보드에서 눌러 들어갈 때 사용자 탭에 넘길 값(바로 열 사용자, 필터). key가 바뀌면 사용자 탭을 새로 연다
   const [jump, setJump] = useState<{ userId: number | null; filter: string; key: number }>({ userId: null, filter: 'all', key: 0 });
-  const setTab = (t: Tab) => setTabState(t);
   const go = (t: string, opts?: { userId?: number; filter?: string }) => {
     if (t === 'users') setJump((j) => ({ userId: opts?.userId ?? null, filter: opts?.filter ?? 'all', key: j.key + 1 }));
-    setTabState(t as Tab);
+    if (isTab(t)) { setTabState(t); if (location.hash !== `#${t}`) history.pushState(null, '', `#${t}`); }
     window.scrollTo({ top: 0 });
   };
+  useEffect(() => { const on = () => setTabState(fromHash()); window.addEventListener('popstate', on); return () => window.removeEventListener('popstate', on); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { const it = ALL_ITEMS.find((i) => i.id === tab); document.title = `${it?.label ?? '관리자'} · Trendist 관리자`; }, [tab]);
+  useEffect(() => { if (!navOpen) return; const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setNavOpen(false); }; window.addEventListener('keydown', esc); return () => window.removeEventListener('keydown', esc); }, [navOpen]);
 
   useEffect(() => {
     resumeSession().then((ok) => {
@@ -63,41 +67,69 @@ export function AdminApp() {
       </main>
     );
   }
+  const cur = ALL_ITEMS.find((i) => i.id === tab) ?? ALL_ITEMS[0];
   return (
-    <main className="admin">
-      <header className="admin-head">
-        <h1>Trendist 관리자</h1>
-        <nav className="admin-tabs" role="tablist">
-          {TABS.map(([t, label]) => (
-            <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? 'on' : undefined} onClick={() => setTab(t)}>{label}</button>
+    <div className="adm-shell">
+      <aside className={`adm-side${navOpen ? ' open' : ''}`} aria-label="관리자 메뉴">
+        <div className="adm-brand">
+          <img src="/logo.png" alt="" width="30" height="30" />
+          <div><strong>Trendist</strong><span>관리자</span></div>
+          <button type="button" className="adm-iconbtn adm-close" aria-label="메뉴 닫기" onClick={() => setNavOpen(false)}><Icon name="close" /></button>
+        </div>
+        <nav className="adm-nav">
+          {NAV.map((g) => (
+            <div className="adm-group" key={g.title}>
+              <p className="adm-group-title">{g.title}</p>
+              {g.items.map((it) => (
+                <a key={it.id} href={`#${it.id}`} className="adm-item" aria-current={tab === it.id ? 'page' : undefined}
+                   onClick={(e) => { e.preventDefault(); go(it.id); setNavOpen(false); }}>
+                  <Icon name={it.id} /><span>{it.label}</span>
+                </a>
+              ))}
+            </div>
           ))}
         </nav>
-        <label className="muted small admin-country">나라
-          <select value={country} onChange={(e) => { setAdminCountry(e.target.value as AdminCountry); location.reload(); }}>
-            {ADMIN_COUNTRIES.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </label>
-        <a className="muted small" href="/">게임으로</a>
-      </header>
-      {tab === 'dashboard' && <DashboardTab onGo={go} />}
-      {tab === 'stats' && <StatsTab />}
-      {tab === 'spectate' && <SpectateTab />}
-      {tab === 'users' && <UsersTab key={jump.key} initialUserId={jump.userId} initialFilter={jump.filter} />}
-      {tab === 'keywords' && <KeywordsTab />}
-      {tab === 'ai' && <AiCommentsTab />}
-      {tab === 'add' && <BulkTab />}
-      {tab === 'reports' && <ReportsTab onGo={go} />}
-      {tab === 'notices' && <NoticesTab />}
-      {tab === 'emergency' && <EmergencyTab />}
-      {tab === 'guides' && <GuidesTab />}
-      {tab === 'share' && <ShareTab />}
-      {tab === 'integrations' && <IntegrationsTab />}
-      {tab === 'skills' && <SkillsTab />}
-      {tab === 'monsters' && <MonstersTab />}
-      {tab === 'changes' && <ConfigChangesTab />}
-      {tab === 'theme' && <ThemeTab />}
-      {tab === 'settings' && <SettingsTab />}
-    </main>
+        <div className="adm-side-foot">
+          <a className="adm-item" href="/"><Icon name="game" /><span>게임으로 돌아가기</span></a>
+        </div>
+      </aside>
+      {navOpen && <div className="adm-scrim" onClick={() => setNavOpen(false)} />}
+      <div className="adm-main">
+        <header className="adm-top">
+          <button type="button" className="adm-iconbtn adm-burger" aria-label="메뉴 열기" aria-expanded={navOpen} onClick={() => setNavOpen(true)}><Icon name="menu" /></button>
+          <div className="adm-title">
+            <span className="adm-crumb">{cur.group}</span>
+            <h1>{cur.label}</h1>
+            {cur.desc && <p>{cur.desc}</p>}
+          </div>
+          <div className="adm-top-right">
+            <span className="adm-top-label">서버</span>
+            <Select size="sm" className="adm-server" menuWidth="auto" aria-label="관리할 서버(나라)" align="end" value={country} options={ADMIN_COUNTRIES.map((c) => ({ value: c, label: c === 'KR' ? 'KR 한국' : 'GLOBAL 글로벌' }))}
+                    onChange={(c) => { setAdminCountry(c); location.reload(); }} />
+          </div>
+        </header>
+        <main className="admin adm-content" key={tab}>
+          {tab === 'dashboard' && <DashboardTab onGo={go} />}
+          {tab === 'stats' && <StatsTab />}
+          {tab === 'spectate' && <SpectateTab />}
+          {tab === 'users' && <UsersTab key={jump.key} initialUserId={jump.userId} initialFilter={jump.filter} />}
+          {tab === 'keywords' && <KeywordsTab />}
+          {tab === 'ai' && <AiCommentsTab />}
+          {tab === 'add' && <BulkTab />}
+          {tab === 'reports' && <ReportsTab onGo={go} />}
+          {tab === 'notices' && <NoticesTab />}
+          {tab === 'emergency' && <EmergencyTab />}
+          {tab === 'guides' && <GuidesTab />}
+          {tab === 'share' && <ShareTab />}
+          {tab === 'integrations' && <IntegrationsTab />}
+          {tab === 'skills' && <SkillsTab />}
+          {tab === 'monsters' && <MonstersTab />}
+          {tab === 'changes' && <ConfigChangesTab />}
+          {tab === 'theme' && <ThemeTab />}
+          {tab === 'settings' && <SettingsTab />}
+        </main>
+      </div>
+    </div>
   );
 }
 

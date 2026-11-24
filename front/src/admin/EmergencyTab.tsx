@@ -55,7 +55,7 @@ export function EmergencyTab() {
 
   return (
     <section className="admin-panel em">
-      <p className="muted small em-intro">올리면 접속 중인 모든 사용자의 게임 화면 맨 위에 한 줄로 바로 나타나 글이 천천히 왼쪽으로 흘러가요. 한 번에 하나만 보이고, 새로 올리면 이전 안내는 끝나요. 정한 시간이 지나면 저절로 사라져요.</p>
+      <p className="muted small em-intro">모든 접속자의 게임 화면 맨 위에 문구가 흘러가요. 한 번에 하나만 보이고, 새로 올리면 이전 안내는 끝나며, 정한 시간이 지나면 사라져요.</p>
       {error && <p className="error" role="alert">{error}</p>}
 
       <div className={`em-now${active ? ' on' : ''}`}>
