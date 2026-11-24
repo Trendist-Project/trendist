@@ -40,6 +40,7 @@ public class KeywordJobs {
     private final SearchCounter searchCounter;
     private final TransactionTemplate tx;
     private final Clock clock;
+    private final com.trendist.perf.PerfProbe perf;
 
     /** 1분: 만료된 + 삭제, 트렌드 값이 바뀐 키워드의 보유자 점수 재합산. */
     @Scheduled(fixedDelay = 60_000, initialDelay = 10_000)
@@ -49,6 +50,8 @@ public class KeywordJobs {
             int dropped = keywordService.expireExternal(DataSource.ADMIN, Set.of());
             if (dropped > 0) log.info("admin keywords: {} moved to internal", dropped);
         } catch (RuntimeException e) { log.warn("admin keyword expire failed", e); }
+        long expireStart = System.nanoTime();
+        int expireSql0 = com.trendist.perf.SqlCounter.count();
         int expired = 0;
         List<Long> ids;
         do {
@@ -57,14 +60,20 @@ public class KeywordJobs {
                 try { if (keywordService.expireOne(id)) expired++; } catch (RuntimeException e) { log.warn("expire {} failed", id, e); }
             }
         } while (ids.size() == 500);
+        perf.record("job 만료 처리(expireOne 반복)", 0, System.nanoTime() - expireStart, com.trendist.perf.SqlCounter.count() - expireSql0);
+        perf.value("job 만료된 키워드 수", expired);
 
         // 활동 인원이 바뀌거나 관리자가 식의 설정을 바꾸면 트렌드 값이 달라진다. 바뀐 키워드는 아래에서 보유자 점수를 다시 합산한다
-        try { keywordService.refreshTrendValues(); } catch (RuntimeException e) { log.warn("trend refresh failed", e); }
+        try { perf.time("job refreshTrendValues", keywordService::refreshTrendValues); } catch (RuntimeException e) { log.warn("trend refresh failed", e); }
         Set<Long> playerIds = new HashSet<>();
         for (Long keywordId : keywordService.drainDirtyKeywords()) playerIds.addAll(keywordService.holderPlayerIds(keywordId));
+        long recomputeStart = System.nanoTime();
+        int recomputeSql0 = com.trendist.perf.SqlCounter.count();
         for (Long pid : playerIds) {
             try { playerService.recomputeLocked(pid, false); } catch (RuntimeException e) { log.warn("recompute {} failed", pid, e); }
         }
+        perf.record("job 보유자 점수 재합산", 0, System.nanoTime() - recomputeStart, com.trendist.perf.SqlCounter.count() - recomputeSql0);
+        perf.value("job 재합산한 플레이어 수", playerIds.size());
         if (expired > 0 || !playerIds.isEmpty()) log.info("minute job: expired={}, recomputed={}", expired, playerIds.size());
     }
 

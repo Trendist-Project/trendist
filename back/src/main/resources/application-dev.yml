@@ -17,6 +17,8 @@ spring:
         format_sql: true    # SQL 쿼리를 보기 쉽게 포맷팅하여 출력합니다.
         use_sql_comments: true    # SQL 쿼리에 주석을 추가
         highlight_sql: true   # SQL 쿼리를 하이라이트하여 출력
+        session_factory:
+          statement_inspector: com.trendist.perf.SqlCounter   # 성능 계측: 작업마다 SQL 수를 센다(PerfProbe)
     hibernate:
       # 스키마는 Flyway가 바꾼다. 엔티티와 DB가 다르면(마이그레이션을 빠뜨리면) 시작할 때 오류로 알려 준다
       ddl-auto: validate
@@ -26,5 +28,8 @@ spring:
 
 # 키워드 AI 한 줄 설명용 제미나이 API 키(로컬, 4.12). 없으면 기능이 꺼진다
 trendist:
+  perf:
+    enabled: true      # 성능 계측 로그([perf], 10초마다 요약). 느린 작업은 바로 WARN
+    slow-ms: 300
   gemini:
     api-key: ${DEV_GEMINI_API_KEY:}

@@ -136,6 +136,15 @@ public class KeywordServiceImpl implements KeywordService {
 
     /** +의 본체: 보관함에 넣고 인원·EXP·트렌드 값·점수를 고친다. 플레이어와 키워드 행을 잠근 상태에서 부른다. */
     private KeywordDtos.PlusResult addHolding(Player p, Keyword k, Optional<PlayerKeyword> existing, Instant now) {
+        Added a = addHoldingCore(p, k, existing, now);
+        return new KeywordDtos.PlusResult(card(k, p, now), a.gained(), playerService.summary(p));
+    }
+
+    /** 키워드를 더한 결과(카드·요약 없이 값만): 얻은 점수, 새 만료 시각 */
+    private record Added(long gained, Instant expires) {}
+
+    /** 키워드를 보관함에 더하고 점수·이벤트를 처리한다. 카드·요약은 만들지 않아(구슬처럼 값만 필요한 곳은 이 값으로 충분하다) 조회가 적다. */
+    private Added addHoldingCore(Player p, Keyword k, Optional<PlayerKeyword> existing, Instant now) {
         Instant expires = now.plus(Duration.ofHours(settings.getInt(SettingKeys.PLUS_TTL_HOURS)));
         Country country = p.getCountry();
         long oldTrend = k.getTrendValue();
@@ -157,6 +166,7 @@ public class KeywordServiceImpl implements KeywordService {
 
         if (isState(k, CodeTables.KW_INACTIVE) && k.getHolderCount() >= settings.getInt(SettingKeys.ACTIVATE_HOLDERS)) {
             k.activate(codes.keywordState(CodeTables.KW_ACTIVE), now); // 내부 확산으로 활성(4.6)
+            activeIdCache.remove(k.getCountry().getId()); // 구슬 후보 목록에 바로 반영
         }
         long newTrend = updateTrend(k);
         keywords.flush();
@@ -169,7 +179,7 @@ public class KeywordServiceImpl implements KeywordService {
             // 체력 회복(4.36): 새로 얻은 키워드의 점수와 얻은 뒤의 내 유행도(💤 키워드는 점수 0이라 회복도 없다)
             events.publishEvent(new GameEvents.KeywordGained(country.getId(), p.getId(), isState(k, CodeTables.KW_ACTIVE) ? newTrend : 0, newScore));
         }
-        return new KeywordDtos.PlusResult(card(k, p, now), gainedScore, playerService.summary(p));
+        return new Added(gainedScore, expires);
     }
 
     /** 이미 가진 키워드의 만료 시각만 지금부터 다시 `plus_ttl_hours`(기본 24시간)로 늘린다. 점수·EXP는 그대로(4.3, 4.20, 4.21). 새 만료 시각을 돌려준다 */
@@ -214,7 +224,7 @@ public class KeywordServiceImpl implements KeywordService {
             return loseFromOrb(p);
         }
         Instant now = Instant.now(clock);
-        List<Long> ids = keywords.findIdsByCountryAndState(p.getCountry().getId(), codes.keywordStateId(CodeTables.KW_ACTIVE));
+        List<Long> ids = activeIds(p.getCountry().getId(), false);
         if (prize && ids.size() > 1) {
             // 꽝 없이 "얻는" 구슬이므로, 가능하면 내 보관함에 없는 키워드에서 고른다(이미 가진 키워드면 시간만 갱신돼 얻은 느낌이 없다)
             Set<Long> held = heldCoveredIds(p.getId(), Instant.now(clock)); // 합성으로 가진 원본도 가진 것(4.44)
@@ -223,6 +233,11 @@ public class KeywordServiceImpl implements KeywordService {
         }
         if (ids.isEmpty()) return new KeywordDtos.OrbResult("NONE", null, null, null, 0, null, null);
         Keyword k = keywords.findByIdForUpdate(ids.get(ThreadLocalRandom.current().nextInt(ids.size()))).orElseThrow();
+        if (!isState(k, CodeTables.KW_ACTIVE)) { // 목록은 몇 초 전 값이라 그 사이 💤·금지가 됐을 수 있다: 목록을 새로 읽어 다시 고른다
+            ids = activeIds(p.getCountry().getId(), true);
+            if (ids.isEmpty()) return new KeywordDtos.OrbResult("NONE", null, null, null, 0, null, null);
+            k = keywords.findByIdForUpdate(ids.get(ThreadLocalRandom.current().nextInt(ids.size()))).orElseThrow();
+        }
         Optional<PlayerKeyword> existing = playerKeywords.findByPlayerIdAndKeywordId(p.getId(), k.getId());
         Optional<PlayerKeyword> holding = covering(p.getId(), k.getId(), now); // 합성 키워드로 가진 것도 이미 가진 것(4.44)
         if (holding.isPresent()) {
@@ -230,9 +245,27 @@ public class KeywordServiceImpl implements KeywordService {
             return new KeywordDtos.OrbResult("RENEWED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
                     k.getHolderCount(), 0L, renewHolding(holding.get(), now));
         }
-        KeywordDtos.PlusResult r = addHolding(p, k, existing, now);
+        Added r = addHoldingCore(p, k, existing, now);
         return new KeywordDtos.OrbResult("GAINED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
-                k.getHolderCount(), r.gained(), r.keyword().myExpiresAt());
+                k.getHolderCount(), r.gained(), r.expires());
+    }
+
+    /** 나라의 🔥활성 일반 키워드 번호 목록과 읽은 시각 */
+    private record ActiveIds(List<Long> ids, long at) {}
+    private static final long ACTIVE_IDS_TTL_MS = 5_000;
+    private final Map<Long, ActiveIds> activeIdCache = new ConcurrentHashMap<>();
+
+    /**
+     * 구슬·봇 보상이 고르는 후보(🔥활성 일반 키워드 번호). 구슬마다 전부 읽으면 키워드가 많을수록 무거워 5초 동안 모아 둔다.
+     * 그 사이 활성이 아니게 된 키워드가 뽑히면 고른 쪽이 행을 잠근 뒤 상태를 확인하고(fresh=true로 다시 읽어) 다시 고른다.
+     */
+    private List<Long> activeIds(long countryId, boolean fresh) {
+        long now = System.currentTimeMillis();
+        ActiveIds c = activeIdCache.get(countryId);
+        if (!fresh && c != null && now - c.at() < ACTIVE_IDS_TTL_MS) return c.ids();
+        List<Long> ids = keywords.findIdsByCountryAndState(countryId, codes.keywordStateId(CodeTables.KW_ACTIVE));
+        activeIdCache.put(countryId, new ActiveIds(ids, now));
+        return ids;
     }
 
     /**
@@ -274,7 +307,8 @@ public class KeywordServiceImpl implements KeywordService {
         events.publishEvent(new GameEvents.TitleCheck(p.getId()));
         Instant now = Instant.now(clock);
         // 구슬과 달리 꽝이 없다. 🔥 키워드 전체에서 고른다
-        List<Long> ids = keywords.findIdsByCountryAndState(p.getCountry().getId(), codes.keywordStateId(CodeTables.KW_ACTIVE));
+        List<Long> ids = activeIds(p.getCountry().getId(), false);
+        if (botKeywordId != null && !ids.contains(botKeywordId)) ids = activeIds(p.getCountry().getId(), true); // 지정한 키워드가 목록에 없으면(몇 초 안에 생긴 것) 새로 읽는다
         if (ids.isEmpty()) return new KeywordDtos.OrbResult("NONE", null, null, null, 0, null, null);
         // 봇이 잃은 그 키워드를 준다. 그 사이 🔥가 아니게 됐으면(비활성·금지) 무작위 🔥 키워드로 대신한다
         Long pick = botKeywordId != null && ids.contains(botKeywordId) ? botKeywordId : ids.get(ThreadLocalRandom.current().nextInt(ids.size()));
@@ -286,9 +320,9 @@ public class KeywordServiceImpl implements KeywordService {
             return new KeywordDtos.OrbResult("RENEWED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
                     k.getHolderCount(), 0L, renewHolding(holding.get(), now));
         }
-        KeywordDtos.PlusResult r = addHolding(p, k, existing, now);
+        Added r = addHoldingCore(p, k, existing, now);
         return new KeywordDtos.OrbResult("GAINED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
-                k.getHolderCount(), r.gained(), r.keyword().myExpiresAt());
+                k.getHolderCount(), r.gained(), r.expires());
     }
 
     // ---------------------------------------------------------------- 목록형 외부 소스(10.2)
@@ -334,6 +368,7 @@ public class KeywordServiceImpl implements KeywordService {
         if (holding) return false;
         long old = k.getTrendValue();
         k.activate(codes.keywordState(CodeTables.KW_ACTIVE), now);
+        activeIdCache.remove(k.getCountry().getId()); // 구슬 후보 목록에 바로 반영
         long nw = updateTrend(k);
         publishTrendChange(k, old, nw, null);
         return true;
@@ -363,6 +398,7 @@ public class KeywordServiceImpl implements KeywordService {
         long old = k.getTrendValue();
         k.holdExternal(source, externalHoldUntil(now)); // 다른 소스였어도 admin으로 바꾸고 지금부터 다시 7일
         k.activate(codes.keywordState(CodeTables.KW_ACTIVE), now);
+        activeIdCache.remove(k.getCountry().getId()); // 구슬 후보 목록에 바로 반영
         long nw = updateTrend(k);
         keywords.flush();
         publishTrendChange(k, old, nw, null);
@@ -805,10 +841,22 @@ public class KeywordServiceImpl implements KeywordService {
         int changed = 0;
         List<Keyword> all = keywords.findAllByStateWithSource(activeId);
         // 일반 키워드를 먼저, 합성 키워드(4.44)는 구성 원본의 값을 따라가므로 그다음에 다시 구한다
+        Map<Long, List<Long>> mergedParts = Map.of();
+        Map<Long, Keyword> partById = Map.of();
         for (int pass = 0; pass < 2; pass++) {
+            if (pass == 1) { // 합성 키워드의 구성 원본은 한 번에 읽는다(합성 키워드마다 조회하면 합성이 많을수록 SQL이 폭증한다). 일반 키워드를 고친 뒤라 최신 값이다
+                List<Long> mergedIds = all.stream().filter(Keyword::isMerged).map(Keyword::getId).toList();
+                if (!mergedIds.isEmpty()) {
+                    mergedParts = new HashMap<>();
+                    for (KeywordMergePart mp : mergeParts.findByKeywordIds(mergedIds)) mergedParts.computeIfAbsent(mp.getKeywordId(), x -> new ArrayList<>()).add(mp.getPartKeywordId());
+                    Map<Long, Keyword> byId = new HashMap<>();
+                    keywords.findAllById(mergedParts.values().stream().flatMap(List::stream).distinct().toList()).forEach(pk -> byId.put(pk.getId(), pk));
+                    partById = byId;
+                }
+            }
             for (Keyword k : all) {
                 if (k.isMerged() != (pass == 1)) continue;
-                long v = k.isMerged() ? mergedTrend(k)
+                long v = k.isMerged() ? mergedFromBatch(k, mergedParts, partById)
                         : formula.trendValue(true, k.getHolderCount(), k.getDataSource().getWeight().doubleValue(),
                                 population.get(k.getCountry().getId()), normalizedLength(k));
                 if (v == k.getTrendValue()) continue;
@@ -1306,6 +1354,7 @@ public class KeywordServiceImpl implements KeywordService {
             if (isListSource(c.source())) k.holdExternal(c.source(), externalHoldUntil(now));
             else k.setDataSource(c.source());
             k.activate(codes.keywordState(CodeTables.KW_ACTIVE), now);
+            activeIdCache.remove(k.getCountry().getId()); // 구슬 후보 목록에 바로 반영
             long nw = updateTrend(k);
             publishTrendChange(k, old, nw, null);
         });
@@ -1326,6 +1375,7 @@ public class KeywordServiceImpl implements KeywordService {
             throw ApiException.conflict("RETRY", "잠시 후 다시 시도해 주세요");
         }
         updateTrend(k);
+        activeIdCache.remove(country.getId()); // 새 키워드가 구슬 후보 목록에 바로 들어가게
         return k;
     }
 
@@ -1339,6 +1389,19 @@ public class KeywordServiceImpl implements KeywordService {
 
     /** 정규화 값(공백 제거)의 글자 수: 글자 수 가점(4.44)에 쓴다. */
     private static int normalizedLength(Keyword k) { return k.getNormalized().codePointCount(0, k.getNormalized().length()); }
+
+    /** 합성 키워드의 점수를 미리 읽어 둔 구성 원본으로 계산한다(mergedTrend와 같은 값, 조회 없음). */
+    private long mergedFromBatch(Keyword m, Map<Long, List<Long>> partsOf, Map<Long, Keyword> partById) {
+        long sum = 0;
+        int stars = 0;
+        for (Long id : partsOf.getOrDefault(m.getId(), List.of())) {
+            Keyword part = partById.get(id);
+            if (part == null) continue;
+            sum += part.getTrendValue();
+            stars++;
+        }
+        return formula.mergedValue(sum, stars);
+    }
 
     /** 합성 키워드의 점수(4.44): 구성 원본(1성) 키워드 점수의 합 × 별 개수. 💤·금지 원본은 점수가 0이라 보태지 않는다. */
     private long mergedTrend(Keyword m) {

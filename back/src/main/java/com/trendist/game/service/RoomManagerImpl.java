@@ -42,12 +42,26 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
      */
     private final java.util.concurrent.Semaphore dbSlots = new java.util.concurrent.Semaphore(4);
 
-    private void db(Runnable task) {
+    private void db(Runnable task) { db("db", task); }
+
+    /** DB 작업을 줄에 넣는다. name은 성능 계측(PerfProbe)에서 작업을 구분하는 이름이다 */
+    private void db(String name, Runnable task) {
+        long queuedAt = System.nanoTime();
+        perf.dbEnqueued();
         workers.submit(() -> {
             dbSlots.acquireUninterruptibly();
-            try { task.run(); } finally { dbSlots.release(); }
+            long start = System.nanoTime();
+            int sql0 = com.trendist.perf.SqlCounter.count();
+            com.trendist.perf.SqlCounter.clearKinds();
+            perf.dbStarted();
+            try { task.run(); } finally {
+                dbSlots.release();
+                perf.dbFinished();
+                perf.record("db " + name, start - queuedAt, System.nanoTime() - start, com.trendist.perf.SqlCounter.count() - sql0, com.trendist.perf.SqlCounter.takeKinds());
+            }
         });
     }
+    private final com.trendist.perf.PerfProbe perf; // 성능 계측(로컬 점검용, 꺼져 있으면 기록하지 않는다)
     private final SettingService settings;
     private final com.trendist.skill.service.SkillCatalog skillCatalog;
     private final com.trendist.skill.service.SkillLoadoutService skillLoadouts;
@@ -63,7 +77,9 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
                            com.trendist.monster.service.MonsterRecorder monsterRecorder,
                            com.trendist.skill.service.SkillCatalog skillCatalog,
                            com.trendist.skill.service.SkillLoadoutService skillLoadouts,
-                           @org.springframework.context.annotation.Lazy com.trendist.player.service.PlayerService playerService) {
+                           @org.springframework.context.annotation.Lazy com.trendist.player.service.PlayerService playerService,
+                           com.trendist.perf.PerfProbe perf) {
+        this.perf = perf;
         this.playerService = playerService;
         this.monsterCatalog = monsterCatalog;
         this.monsterRecorder = monsterRecorder;
@@ -119,7 +135,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
                 if (now) r.setKeywordCatalog(list); else r.submit(rr -> rr.setKeywordCatalog(list));
             } catch (RuntimeException e) { log.warn("bot catalog load failed for country {}", countryId, e); }
         };
-        if (now) load.run(); else db(load);
+        if (now) load.run(); else db("loadCatalog", load);
     }
 
     @Override
@@ -144,7 +160,9 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
             ScheduledExecutorService ex = Executors.newSingleThreadScheduledExecutor(
                     run -> { Thread t = new Thread(run, "room-" + id); t.setDaemon(true); return t; }); // 틱은 플랫폼 스레드
             ex.scheduleAtFixedRate(() -> {
+                long t0 = System.nanoTime();
                 try { r.tick(); } catch (Throwable e) { log.error("tick failed", e); }
+                perf.record("tick room-" + id, 0, System.nanoTime() - t0, 0, Room.TICK_MS * 1_000_000L); // 한 틱이 50ms를 넘기면 '초과'
             }, Room.TICK_MS, Room.TICK_MS, TimeUnit.MILLISECONDS);
             tickers.put(id, ex);
             return r;
@@ -368,7 +386,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
         long loserId = loser.playerId;
         String winnerName = winner.nickname, loserName = loser.nickname;
         Long winnerId = winner.bot ? null : winner.playerId;
-        db(() -> {
+        db("steal", () -> {
             try {
                 if (winnerId == null) {
                     keywordService.loseRandom(loserId).ifPresent(lost -> room.submit(r -> {
@@ -398,7 +416,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
         KeywordLoss.Cause cause = loss.cause();
         String by = nameOf(loss.by());
         int count = loss.amount();
-        db(() -> {
+        db("drop", () -> {
             try {
                 java.util.List<String> texts = new java.util.ArrayList<>();
                 long total = 0;
@@ -427,9 +445,10 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
         long loserId = loser.playerId, winnerId = winner.playerId;
         String winnerName = winner.nickname;
         boolean winnerBot = winner.bot;
-        db(() -> {
+        db("losePercent", () -> {
             try {
                 keywordService.loseFraction(loserId, loss.amount()).ifPresent(lost -> {
+                    perf.value("잃은 키워드 수(losePercent)", lost.count());
                     if (cause.countsSteal && !winnerBot) playerService.recordSteal(winnerId); // 불꽃으로 공격 성공 한 번 = 빼앗은 횟수 +1(4.3)
                     room.submit(r -> {
                         r.dropPrizeOrbs(loser, lost.activeCount()); // 잃은 🔥활성 키워드 수의 일부만큼 ! 구슬(4.20)
@@ -451,7 +470,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
         KeywordLoss.Cause cause = loss.cause();
         long playerId = winner.playerId;
         String botName = loss.victim().nickname;
-        db(() -> {
+        db("takeFromBot", () -> {
             try {
                 KeywordDtos.OrbResult r = keywordService.gainFromBot(playerId, loss.botKeywordId());
                 boolean won = "GAINED".equals(r.status()) || "RENEWED".equals(r.status());
@@ -473,7 +492,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
 
     @Override
     public void monsterStarted(Room room, com.trendist.game.room.Monster.Spec spec, com.trendist.game.room.Monster.Start start) {
-        db(() -> {
+        db("monsterStarted", () -> {
             try { monsterRecorder.started(spec.spawnId(), start); }
             catch (RuntimeException e) { log.warn("monster start record failed for spawn {}", spec.spawnId(), e); }
         });
@@ -482,7 +501,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     /** 끝난 몬스터: 등장 기록·피해를 남기고, 보상(EXP, 🔥 키워드)을 준 뒤 접속 중인 사람에게 알린다 */
     @Override
     public void monsterEnded(Room room, com.trendist.game.room.Monster.Result result) {
-        db(() -> {
+        db("monsterEnded", () -> {
             try { monsterRecorder.finish(result); }
             catch (RuntimeException e) { log.warn("monster finish record failed for spawn {}", result.spec().spawnId(), e); }
             for (var rw : result.rewards()) {
@@ -507,7 +526,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     @Override
     public void saveSkillSlots(Room room, Room.Member member, java.util.List<String> slots) {
         long playerId = member.playerId;
-        db(() -> {
+        db("saveSkillSlots", () -> {
             try { skillLoadouts.save(playerId, slots); }
             catch (RuntimeException e) { log.warn("save skill slots failed for player {}", playerId, e); }
         });
@@ -516,7 +535,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     @Override
     public void requestSteal(Room room, Room.Member attacker) {
         long playerId = attacker.playerId;
-        db(() -> {
+        db("requestSteal", () -> {
             try {
                 playerService.recordSteal(playerId);
             } catch (RuntimeException e) {
@@ -528,7 +547,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     @Override
     public void requestTie(Room room, Room.Member member) {
         long playerId = member.playerId;
-        db(() -> {
+        db("requestTie", () -> {
             try {
                 playerService.recordTie(playerId);
             } catch (RuntimeException e) {
@@ -540,7 +559,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     @Override
     public void requestDefeat(Room room, Room.Member loser) {
         long playerId = loser.playerId;
-        db(() -> {
+        db("requestDefeat", () -> {
             try {
                 playerService.recordDefeat(playerId);
             } catch (RuntimeException e) {
@@ -552,7 +571,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     @Override
     public void requestCombo(Room room, Room.Member winner, int combo) {
         long playerId = winner.playerId;
-        db(() -> {
+        db("requestCombo", () -> {
             try {
                 playerService.recordCombo(playerId, combo);
             } catch (RuntimeException e) {
@@ -564,7 +583,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     @Override
     public void requestFlameOut(Room room, Room.Member by) {
         long playerId = by.playerId;
-        db(() -> {
+        db("requestFlameOut", () -> {
             try {
                 playerService.recordFlameOut(playerId);
             } catch (RuntimeException e) {
@@ -576,7 +595,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     @Override
     public void requestKill(Room room, Room.Member killer) {
         long playerId = killer.playerId;
-        db(() -> {
+        db("requestKill", () -> {
             try {
                 playerService.recordKill(playerId);
             } catch (RuntimeException e) {
@@ -588,7 +607,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     @Override
     public void requestOrb(Room room, Room.Member eater, boolean prize) {
         long playerId = eater.playerId;
-        db(() -> {
+        db("requestOrb", () -> {
             try {
                 KeywordDtos.OrbResult r = prize ? keywordService.openPrizeOrb(playerId) : keywordService.openOrb(playerId);
                 Map<String, Object> msg = new HashMap<>();
@@ -613,7 +632,11 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
         if (m.bot || m.offline) return; // 봇은 연결이 없고, 연결이 끊긴 원(4.32)에는 보낼 곳이 없다
         WebSocketSession s = (WebSocketSession) m.session;
         if (!s.isOpen()) return;
+        int size = binary.remaining();
+        long t0 = System.nanoTime();
         try { s.sendMessage(new BinaryMessage(binary)); } catch (Exception e) { /* 느린 연결: 데코레이터가 버린다 */ }
+        perf.record("ws send 스냅샷(binary)", 0, System.nanoTime() - t0, 0); // 성능 계측: 보내는 데 걸린 시간(틱을 막는지 본다)과 크기
+        perf.value("ws 스냅샷 바이트", size);
     }
 
     @Override
@@ -627,11 +650,13 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
         if (m.bot || m.offline) return; // 봇은 연결이 없고, 연결이 끊긴 원(4.32)에는 보낼 곳이 없다
         WebSocketSession s = (WebSocketSession) m.session;
         if (!s.isOpen()) return;
+        long t0 = System.nanoTime();
         try { s.sendMessage(new TextMessage(json.writeValueAsString(message))); } catch (Exception e) { /* 연결 종료 */ }
+        perf.record("ws send 문자 " + message.get("type"), 0, System.nanoTime() - t0, 0);
     }
 
     @Override
-    public void submitWork(Runnable r) { db(r); }
+    public void submitWork(Runnable r) { db("submitWork", r); }
 
     @Override
     public void kick(long countryId, long playerId, String message) {
