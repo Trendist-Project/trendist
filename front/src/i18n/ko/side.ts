@@ -30,4 +30,7 @@ export default {
   sortActiveAria: '{label} {dir}, 눌러서 순서 바꾸기',
   sortByAria: '{label}으로 정렬',
   openAria: '{kw} 자세히 보기',
+  tier1: '주목받는 키워드',
+  tier2: '인기 키워드',
+  tier3: '대세 키워드',
 };

@@ -1866,17 +1866,28 @@ button.link-back:hover { color: var(--text); }
 .arena-tools .sound-toggle { transition: opacity 0.12s, border-color 0.12s, background 0.12s; }
 .arena-tools .sound-toggle[aria-pressed="false"] { opacity: 0.55; }
 
-/* 보관함 키워드 카드(4.42): 남은 시간 게이지 */
+/* 보관함 키워드 카드(4.42): 남은 시간 게이지 + 점수 등급(tier0~3)에 따른 왼쪽 띠·점수 칩·배경 */
+.mine-card { position: relative; }
+.mine-card::before { content: ''; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 3px; background: transparent; }
+.mine-card .mine-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; padding-right: 2px; }
+.mine-card .mine-card-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mine-card .kw-time { font-size: 0.72rem; color: var(--muted); line-height: 1.3; }
 .mine-card .kw-gauge { height: 5px; border-radius: 3px; background: rgba(255,255,255,0.09); overflow: hidden; margin-top: 3px; }
 .mine-card .kw-gauge i { display: block; height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.6s; }
 .mine-card.mid .kw-gauge i { background: #f0a73a; }
 .mine-card.urgent .kw-gauge i { background: #ef5a5a; animation: kw-urgent 1.1s ease-in-out infinite; }
-.mine-card.urgent { box-shadow: inset 3px 0 0 #ef5a5a; }
-.mine-card.hot { background: linear-gradient(90deg, rgba(255,140,60,0.09), transparent 55%); }
-.kw-flame { display: inline-block; margin-right: 3px; transform-origin: 50% 90%; animation: kw-flame 1.4s ease-in-out infinite; }
+.mine-score { margin-left: auto; flex: none; padding: 1px 9px; border-radius: 999px; font-size: 0.74rem; font-weight: 700; font-variant-numeric: tabular-nums; background: rgba(255,255,255,0.07); color: var(--muted); }
+.mine-card.tier1::before { background: var(--accent); }
+.mine-card.tier1 .mine-score { background: rgba(63,182,139,0.16); color: #bff0dc; }
+.mine-card.tier2::before { background: #f0a73a; }
+.mine-card.tier2 { background: linear-gradient(90deg, rgba(240,167,58,0.09), transparent 60%); }
+.mine-card.tier2 .mine-score { background: rgba(240,167,58,0.18); color: #ffd9a0; }
+.mine-card.tier3::before { width: 4px; background: linear-gradient(180deg, #ffd166, #ff8a3d); }
+.mine-card.tier3 { background: linear-gradient(90deg, rgba(255,190,80,0.16), rgba(255,138,61,0.04) 55%, transparent); box-shadow: inset 0 0 0 1px rgba(255,190,80,0.22); }
+.mine-card.tier3 .mine-card-head strong { color: #fff3d6; }
+.mine-card.tier3 .mine-score { background: linear-gradient(135deg, #ffd166, #ff9a4a); color: #3a1d00; }
 @keyframes kw-urgent { 50% { opacity: 0.45; } }
-@keyframes kw-flame { 0%, 100% { transform: rotate(-6deg) scale(1); } 50% { transform: rotate(6deg) scale(1.15); } }
-@media (prefers-reduced-motion: reduce) { .mine-card.urgent .kw-gauge i, .kw-flame { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .mine-card.urgent .kw-gauge i { animation: none; } }
 
 /* 첫 입장 튜토리얼(4.43): 위쪽 가운데 작은 카드 */
 .tutorial { position: absolute; left: 50%; top: 70px; transform: translateX(-50%); z-index: 7; width: min(92vw, 400px); padding: 10px 14px; border-radius: 14px; background: rgba(11,15,23,0.9); border: 1px solid var(--accent); box-shadow: 0 6px 24px rgba(0,0,0,0.45); color: #e6edf6; font-size: 0.86rem; }

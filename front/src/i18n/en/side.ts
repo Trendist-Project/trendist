@@ -30,4 +30,7 @@ export default {
   sortActiveAria: '{label} {dir}, press to reverse the order',
   sortByAria: 'Sort by {label}',
   openAria: 'View {kw} details',
+  tier1: 'Rising keyword',
+  tier2: 'Popular keyword',
+  tier3: 'Trending keyword',
 };

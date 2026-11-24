@@ -231,22 +231,29 @@ export function SidePanel({ onPlused, onError, refreshKey, onOpenKeyword, onShar
   );
 }
 
+/** 점수(트렌드 값, 가진 사람이 많을수록 오른다)에 따른 카드 등급: 0 기본 · 1 주목(15~) · 2 인기(30~) · 3 대세(50~) */
+const tierOf = (score: number) => (score >= 50 ? 3 : score >= 30 ? 2 : score >= 15 ? 1 : 0);
+
 /**
- * 보관함 키워드 카드(4.42): 이름·상태 배지·점수 아래에 남은 시간 게이지가 있다. 게이지는 처음 +한 시간(또는 갱신한 시간)부터 사라질 때까지 줄어들고,
- * 절반 아래는 주황, 1시간 아래는 빨강으로 깜빡이며, 🔥 활성 키워드는 불꽃이 일렁인다. 남은 시간 글자와 같은 값이라 색에만 의존하지 않는다.
+ * 보관함 키워드 카드(4.42): 이름·상태 배지 아래에 남은 시간 게이지가 있다. 게이지는 처음 +한 시간(또는 갱신한 시간)부터 사라질 때까지 줄어들고,
+ * 절반 아래는 주황, 1시간 아래는 빨강으로 깜빡인다. 남은 시간 글자도 있어 색에만 기대지 않는다.
+ * 카드의 모양은 키워드 **점수**로 달라진다(점수는 가진 사람이 많을수록 오른다): 왼쪽 띠와 점수 칩이 15점부터 초록, 30점부터 주황, 50점부터 금빛 그라데이션이 된다.
+ * 상태(활성·비활성)는 배지 하나로만 보여 준다(불꽃 아이콘을 더 붙이지 않는다).
  */
 function MineCard({ k, onOpen }: { k: MyKeyword; onOpen: () => void }) {
   const left = new Date(k.expiresAt).getTime() - Date.now();
   const total = Math.max(new Date(k.expiresAt).getTime() - new Date(k.plusedAt).getTime(), left, 1);
   const ratio = Math.max(0, Math.min(1, left / total));
   const tone = left < 3_600_000 ? 'urgent' : ratio < 0.5 ? 'mid' : 'ok';
+  const tier = tierOf(k.trendValue);
   return (
-    <li className={`mine-item mine-card ${tone}${k.state === '활성' ? ' hot' : ''}`}>
+    <li className={`mine-item mine-card ${tone} tier${tier}`}>
       <button className="mine-open" onClick={onOpen} aria-label={t('side.openAria', { kw: k.text })}>
-        <div className="mine-card-head"><strong>{k.state === '활성' && <span className="kw-flame" aria-hidden="true">🔥</span>}{k.text}</strong> <span className="badge">{STATE_BADGE[k.state] ?? k.state}</span></div>
-        <div className="muted small">
-          {t('side.points', { n: k.trendValue })} · <span className={left < 3_600_000 ? 'warn' : ''}>{remaining(k.expiresAt)}</span>
+        <div className="mine-card-head">
+          <strong>{k.text}</strong> <span className="badge">{STATE_BADGE[k.state] ?? k.state}</span>
+          <span className="mine-score" title={tier > 0 ? t(`side.tier${tier}`) : undefined}>{t('side.points', { n: k.trendValue })}</span>
         </div>
+        <div className="kw-time"><span className={left < 3_600_000 ? 'warn' : ''}>{remaining(k.expiresAt)}</span></div>
         <div className="kw-gauge" role="presentation"><i style={{ width: `${(ratio * 100).toFixed(1)}%` }} /></div>
         <span className="mine-chevron" aria-hidden="true">›</span>
       </button>
