@@ -502,7 +502,9 @@ function SidePanelImpl({ onPlused, onMerged, onError, refreshKey, onOpenKeyword,
   // 카드는 한꺼번에 수백 개를 만들면 화면이 멈추므로 처음 24개만 만들고, 목록 맨 아래가 보일 만큼 스크롤하면 20개씩 더 만든다(한 번 만든 카드는 그대로 둔다)
   const [shown, setShown] = useState(MINE_FIRST);
   // 정렬·필터를 바꾸면 목록이 달라지므로 처음 개수부터 다시 보여 준다(앞에서 많이 불러왔어도 바뀐 목록을 한꺼번에 그리지 않는다)
-  useEffect(() => { setShown(MINE_FIRST); }, [sort, activeStars]);
+  // activeStars는 보관함이 바뀔 때마다 새 배열로 계산되므로(키워드를 얻을 때마다) 배열 자체가 아니라 값(문자열)을 본다: 안 그러면 새 키워드를 먹을 때마다 목록이 24개로 접혔다 다시 늘어나 스크롤바가 튄다
+  const listKey = `${activeStars.join(',')}|${sort ? `${sort.key}:${sort.dir}` : 'off'}`;
+  useEffect(() => { setShown(MINE_FIRST); }, [listKey]);
   const moreRef = useRef<HTMLLIElement>(null);
   useEffect(() => {
     const el = moreRef.current;
