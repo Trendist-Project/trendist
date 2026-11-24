@@ -167,3 +167,36 @@ export function drawComboFlames(ctx: CanvasRenderingContext2D, x: number, y: num
   }
   ctx.restore();
 }
+
+/**
+ * 레벨 등급 오라(4.40): 레벨이 오르면 원 바깥에 고리가 생겨 한눈에 "고수"를 알아본다. 꾸미기와 따로 모두에게 같은 고정 연출이다.
+ * 20 은빛 고리 · 40 금빛 고리와 도는 반짝임 · 60 하늘색 겹고리(맥동) · 80 보라 점선이 도는 오라 · 100 무지개 프리즘 고리. px는 화면 1픽셀에 해당하는 월드 길이(1 / 줌).
+ */
+export function drawLevelAura(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, level: number, t: number, px: number) {
+  if (level < 20) return;
+  const w = Math.max(px * 1.5, r * 0.045), R = r + Math.max(px * 3, r * 0.09) + w / 2;
+  ctx.save();
+  ctx.lineWidth = w;
+  if (level >= 100) {
+    const n = 28;
+    for (let i = 0; i < n; i++) {
+      ctx.strokeStyle = `hsla(${(i / n) * 360 + t * 70},95%,68%,0.95)`;
+      ctx.beginPath(); ctx.arc(x, y, R, (i / n) * Math.PI * 2, ((i + 1.15) / n) * Math.PI * 2); ctx.stroke();
+    }
+  } else if (level >= 80) {
+    ctx.strokeStyle = 'rgba(214,120,255,0.18)'; ctx.lineWidth = w * 3.2; ctx.beginPath(); ctx.arc(x, y, R + w, 0, Math.PI * 2); ctx.stroke();
+    ctx.lineWidth = w; ctx.strokeStyle = 'rgba(226,150,255,0.95)'; ctx.setLineDash([r * 0.28, r * 0.16]); ctx.lineDashOffset = -t * r * 0.7;
+    ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.stroke();
+  } else if (level >= 60) {
+    const pulse = 0.5 + 0.5 * Math.sin(t * 3);
+    ctx.strokeStyle = `rgba(90,220,255,${0.55 + 0.4 * pulse})`; ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = `rgba(90,220,255,${0.25 + 0.3 * (1 - pulse)})`; ctx.beginPath(); ctx.arc(x, y, R + w * 2.2, 0, Math.PI * 2); ctx.stroke();
+  } else if (level >= 40) {
+    ctx.strokeStyle = 'rgba(255,205,84,0.95)'; ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,244,190,0.95)';
+    for (let i = 0; i < 4; i++) { const a = t * 1.2 + i * Math.PI / 2; ctx.beginPath(); ctx.arc(x + Math.cos(a) * R, y + Math.sin(a) * R, Math.max(px * 2, w * 0.9), 0, Math.PI * 2); ctx.fill(); }
+  } else {
+    ctx.strokeStyle = 'rgba(214,224,240,0.85)'; ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.restore();
+}

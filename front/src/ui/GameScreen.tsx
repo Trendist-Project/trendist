@@ -38,6 +38,10 @@ import { EmergencyBar, emergencyText, useEmergency } from './EmergencyBar';
 import { fmtNumber, t, tOr } from '../i18n';
 import { MonsterHud, MonsterNoteCard, type MonsterNote } from './MonsterHud';
 import { SkillIcon } from './SkillIcon';
+import { KillFeed, type FeedLine } from './KillFeed';
+import { Tutorial, tutorialDone, markTutorialDone, type TutorialApi } from './Tutorial';
+import { playSfx, soundAudible, soundState, subscribeSound, unlockAudio } from '../game/sound';
+import { SoundPanel } from './SoundPanel';
 
 interface Props {
   initialPlayer: PlayerSummary;
@@ -134,7 +138,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   const setSide = useCallback((hidden: boolean) => { setSideHidden(hidden); saveSideHidden(hidden); }, []);
   const [showLeaderboard, setShowLeaderboard] = useState(loadLeaderboardPref);
   const [showHelp, setShowHelp] = useState(loadHelpPref);
-  const [panel, setPanel] = useState<'notice' | 'guide' | 'profile' | 'skills' | 'wheel' | null>(null);
+  const [panel, setPanel] = useState<'notice' | 'guide' | 'profile' | 'skills' | 'wheel' | 'sound' | null>(null);
   const [wheelReady, setWheelReady] = useState(false); // 돌림판을 지금 돌릴 수 있다(메뉴에 빨간 점)
   const [orbReveal, setOrbReveal] = useState<{ result: RevealResult; key: number } | null>(null);
   // 키워드를 얻거나 잃은 결과 카드(구슬·빼앗기·빼앗김·봇)는 모두 이 한 곳으로 띄운다
@@ -174,6 +178,13 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   useEffect(() => { if (menuOpen || showHelp || showLeaderboard) toolsLayer.front(); }, [menuOpen, showHelp, showLeaderboard]); // eslint-disable-line react-hooks/exhaustive-deps
   const [searchRequest, setSearchRequest] = useState<{ text: string; key: number } | null>(null);
   const [chatLines, setChatLines] = useState<ChatLine[]>([]);
+  const [feed, setFeed] = useState<FeedLine[]>([]); // 방 전체의 싸움 소식(4.41)
+  // 첫 입장 튜토리얼(4.43): 처음 보는 사람(키워드도 레벨도 없음)에게만. 이미 키워드가 있으면 끝낸 것으로 친다
+  const [tutorial, setTutorial] = useState(() => { if (tutorialDone()) return false; if (initialPlayer.holdCount > 0 || initialPlayer.level > 1) { markTutorialDone(); return false; } return true; });
+  const tutorialApi = useRef<TutorialApi | null>(null);
+  const bindTutorial = useCallback((a: TutorialApi) => { tutorialApi.current = a; }, []);
+  const [snd, setSnd] = useState(soundState); // 효과음·배경음 켜짐(4.39)
+  useEffect(() => { const sync = () => setSnd(soundState()); sync(); const off = subscribeSound(sync); const un = unlockAudio(); return () => { off(); un(); }; }, []);
   const [chatView, setChatView] = useState<ChatView>(loadChatView);
   const chatOnRef = useRef(chatView !== 'off');
   chatOnRef.current = chatView !== 'off';
@@ -243,6 +254,10 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     const arena = new Arena(canvasRef.current!);
     arenaRef.current = arena;
     arena.start();
+    // 아레나 배경 테마·날씨(4.38): 처음 한 번 받고 10분마다 다시 받는다(날씨·관리자 설정이 바뀌어도 반영). 못 받으면 원래 배경
+    const loadTheme = () => { api.arenaTheme().then((c) => arena.setTheme(c)).catch(() => { /* 원래 배경 */ }); };
+    loadTheme();
+    const themeTimer = window.setInterval(loadTheme, 10 * 60 * 1000);
 
     // 서버 방에 들어간 뒤(welcome)부터 끊길 때까지만 ready. 메시지 처리(gameMessages)와 입력이 함께 쓴다
     const sess: GameSession = { ready: false, myEntity: -1, resyncDir: () => {} };
@@ -272,7 +287,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     const ctx: GameMessageContext = {
       arena, conn, sess, skillLock, toLine, hookedUntilRef, myEntityRef, showReveal, showTitleAlert, showToast, flashSkill, applyEmergency,
       setPlayer, setOnline, setBots, setMonsterNote, setMyBossDmg, setKicked, setMyHp, setSkillOn, setDead, setMyCombo, setHit, setDash, setSkillCd, setSkillActive,
-      setHookedUntil, setSlots, setRefreshKey, setOrbReveal, setPingMs, setChatLines,
+      setHookedUntil, setSlots, setRefreshKey, setOrbReveal, setPingMs, setChatLines, setFeed, tutorialEvent: (e) => tutorialApi.current?.event(e),
     }; // 메시지는 연결이 열린 뒤에야 오므로 conn을 만든 다음에 묶어도 된다
     sendEmoteRef.current = (code: string) => { if (sess.ready) conn.send({ type: 'emote', code }); };
     // 대시(4.27): 쿨타임·움직이는 중인지는 서버가 보고, 시작하면 {type: 'dash'}로 알려 온다
@@ -303,6 +318,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     return () => {
       input.detach();
       clearInterval(pingTimer);
+      clearInterval(themeTimer);
       window.removeEventListener('pagehide', bye);
       bye(); // 로그아웃 등으로 게임 화면을 나갈 때도
       conn.stop();
@@ -357,6 +373,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   const onPlused = useCallback((gained: number, p: PlayerSummary) => {
     setPlayer(p);
     if (gained > 0) arenaRef.current?.floatText(`+${gained}`);
+    playSfx('plus'); tutorialApi.current?.event('plus');
   }, []);
   // 키워드 상세 창에서 +하면 보관함도 새로 읽는다
   const onPlusedInModal = useCallback((gained: number, p: PlayerSummary) => {
@@ -430,6 +447,8 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
           <span className="hud-me">{t('gamescreen.score', { n: fmtNumber(Number(player.currentScore)) })}</span>
           {status !== 'open' && <span className="warn">{status === 'connecting' ? t('gamescreen.connecting') : t('gamescreen.reconnecting')}</span>}
         </div>
+        <KillFeed lines={feed} />
+        {tutorial && status === 'open' && !dead && <Tutorial position={() => arenaRef.current?.myPosition() ?? null} bind={bindTutorial} onClose={() => setTutorial(false)} onOpenSearch={() => setSideRequest({ tab: 'search', key: Date.now() })} />}
         {targetCard !== null && (
           <TargetCard entityNo={targetCard} following={followUi === targetCard} touchKey={targetTouch} read={readTarget} onClose={closeTargetCard}
                       onDetail={() => { const e = targetCard; setInfoBot(arenaRef.current?.botInfo(e) ?? null); setInfoLook(arenaRef.current?.entityInfo(e)?.look ?? null); setInfoEntity(e); }}
@@ -466,6 +485,8 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
                     title={t('gamescreen.leaderboardTitle')}>🏆 <span className="tool-label">{t('gamescreen.leaderboard')}</span> </button>
             <button className="chat-toggle" aria-label={t('gamescreen.chat')} aria-pressed={chatView !== 'off'} onClick={() => setChatView((v) => (v === 'off' ? 'open' : 'off'))}
                     title={t('gamescreen.chatTitle')}>💬 <span className="tool-label">{t('gamescreen.chat')}</span> </button>
+            <button className="sound-toggle" aria-label={t('sound.title')} aria-pressed={soundAudible(snd)} onClick={() => setPanel('sound')}
+                    title={t('sound.title')}>{soundAudible(snd) ? '🔊' : '🔇'} <span className="tool-label">{t('gamescreen.sound')}</span> </button>
             <button className="icon-button help-toggle" aria-expanded={showHelp} aria-controls="controls-help"
                     onClick={() => setShowHelp((v) => !v)} title={showHelp ? t('gamescreen.helpClose') : t('gamescreen.helpOpen')}
                     aria-label={showHelp ? t('gamescreen.helpClose') : t('gamescreen.helpOpen')}>?</button>
@@ -488,6 +509,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
                 ['📢', t('gamescreen.notices'), () => setPanel('notice')],
                 ['📖', t('gamescreen.guide'), () => setPanel('guide')],
                 ['🎡', t('wheel.menu'), () => setPanel('wheel')],
+                ['🔊', t('sound.title'), () => setPanel('sound')],
               ] as const).map(([icon, label, act]) => (
                 <button key={label} onClick={() => { setMenuOpen(false); act(); }}>
                   <span aria-hidden="true">{icon}</span>{label}{((label === t('gamescreen.notices') && noticeDot) || (label === t('wheel.menu') && wheelReady)) && <span className="dot-badge inline" aria-hidden="true" />}
@@ -610,6 +632,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
         }} />
       )}
       {panel === 'guide' && <GuideModal onClose={closePanel} />}
+      {panel === 'sound' && <SoundPanel onClose={closePanel} />}
       {panel === 'wheel' && <WheelModal onClose={closePanel} onChange={setWheelReady} onSpun={() => setRefreshKey((k) => k + 1)} />}
       {panel === 'skills' && (
         <SkillWindow skills={skills} slots={slots} keys={slotKeys} level={player.level} onClose={closePanel} onNotice={showToast}

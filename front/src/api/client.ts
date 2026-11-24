@@ -1,6 +1,7 @@
 import { getCountry, getLang } from '../country';
 import { errorText } from '../i18n';
 import { getAdminCountry } from './adminCountry';
+import type { ThemeConfig } from '../game/theme/ThemeLayer';
 import type {
   WheelStatus, WheelSpinResult, Activity, ActivityRange, PlayerCard, PlayerHit, PopularityResult, ScoreHistory, ScoreRange, CommentItem, CommentPage, GuideArticle, GuideCategory, KeywordCard, Me, MyKeyword, Notice, PlayerSummary, 
   AiCommentPage, AiCommentRow, EmergencyNotice, Look, LevelBadge, PixelArtData, ProfileBox, ProfileSave, ShareCardCreated, PlusResult, RankingEntry, SearchResult, TitleBox, TokenResponse, VoteResult, SkillInfo, KeybindingsResponse } from './types';
@@ -116,6 +117,8 @@ export const api = {
   orbOdds: () => request<{ gainPercent: number; losePercent: number }>('GET', '/api/game-info/orb-odds'),
   levelExp: (levels: number[]) => request<Record<string, number>>('GET', `/api/game-info/level-exp?levels=${levels.join(',')}`),
   skills: () => request<SkillInfo[]>('GET', '/api/skills'),
+  /** 아레나 배경 테마·날씨 설정(4.38): 로그인 없이 읽는다. 서버가 정한 모드와 그 나라 위치·시각을 준다 */
+  arenaTheme: (country: string = getCountry()) => request<ThemeConfig>('GET', `/api/arena-theme?country=${country}`),
   /** 내 단축키(4.33): 서버가 바꾸지 않은 동작은 기본 키로 채워서 준다 */
   keybindings: () => request<KeybindingsResponse>('GET', '/api/me/keybindings'),
   saveKeybindings: (bindings: { action: string; key: string | null }[]) => request<KeybindingsResponse>('PUT', '/api/me/keybindings', { bindings }),

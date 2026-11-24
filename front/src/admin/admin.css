@@ -975,3 +975,13 @@ label.notice-toggle, .notice-toggle-main { display: flex; gap: 10px; align-items
 .admin-uptime-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .admin-uptime-label { color: var(--muted); }
 .admin-uptime-time { font-variant-numeric: tabular-nums; }
+
+/* 배경·날씨 탭(4.38) */
+.th-grid { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 14px; align-items: start; }
+.th-form label, .th-tools label { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+.th-form h2 { margin-top: 6px; }
+.th-geo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.th-canvas { width: 100%; aspect-ratio: 16 / 9; border-radius: 12px; border: 1px solid var(--line); display: block; background: #0b0f17; }
+.th-tools { display: flex; gap: 16px; flex-wrap: wrap; align-items: end; }
+.th-tools input[type="range"] { width: 220px; max-width: 100%; }
+@media (max-width: 760px) { .th-grid { grid-template-columns: 1fr; } }

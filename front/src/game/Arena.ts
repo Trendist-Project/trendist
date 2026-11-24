@@ -7,7 +7,7 @@ import type { DmgKind } from './damageText';
 import { MonsterLayer, type MonsterFxMsg, type MonsterHitMsg, type MonsterHud, type MonsterState } from './monsterFx';
 import { BOT_BASE, borderLineWidth, drawTurtle, TURTLE_BASE } from './turtle';
 import { artImage, artPose, drawArt, turnArt } from './pixelArt';
-import { drawBorderEffect, drawComboFlames, drawNameTag, EMOTE_CHAR, type OrbLook } from './skin';
+import { drawBorderEffect, drawComboFlames, drawLevelAura, drawNameTag, EMOTE_CHAR, type OrbLook } from './skin';
 
 const EMOTE_MS = 2500;
 import { Trails } from './trails';
@@ -16,6 +16,8 @@ import { OrbLayer } from './arena/orbs';
 import { SafeZones } from './arena/zones';
 import { HpLayer } from './arena/hp';
 import { roundRectPath } from './arena/draw';
+import { ThemeLayer, type ThemeConfig } from './theme/ThemeLayer';
+import { HitFx } from './hitFx';
 
 /** 다른 엔티티의 최근 스냅샷들(서버 시각 ms 순). 조금 늦은 시각을 두 스냅샷 사이로 보간해 그린다. */
 interface Interp { buf: { t: number; s: EntityState }[]; cur: EntityState }
@@ -139,6 +141,37 @@ export class Arena {
   /** 키워드를 잃은 원의 무적 끝 시각(4.3). 둘레에 보호막과 남은 초를 그린다 */
   private invincibles = new Map<number, number>();
   private levelFxs: LevelFx[] = []; // 레벨업 빛기둥(4.30)
+  /** 아레나 배경 테마와 날씨(4.38). 설정이 꺼져 있으면 원래 배경 그대로 */
+  private theme = new ThemeLayer(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
+  setTheme(cfg: ThemeConfig | null) { this.theme.setConfig(cfg); }
+  /** 내 원의 지금 위치(첫 입장 튜토리얼이 "움직였는지"를 볼 때 쓴다) */
+  myPosition(): { x: number; y: number } | null { return this.me.initialized ? { x: this.me.x, y: this.me.y } : null; }
+  /** 타격감 연출(4.39): 흔들림·번쩍임·파편·확대 튕김·큰 글자 배너 */
+  private hitFx = new HitFx(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
+  /** 닉네임으로 원을 찾는다(서버가 상대를 이름으로만 알려 준다). 못 찾으면 null */
+  private posOfNick(nick: string | undefined): { x: number; y: number; r: number } | null {
+    if (!nick) return null;
+    for (const [e, info] of this.names) if (info.nickname === nick && e !== this.me.e) return this.entityPos(e, performance.now());
+    return null;
+  }
+  /** 내 콤보 단계에 따른 색: 일반 노랑 → 불꽃 주황 → 불꽃 두 배 보라 */
+  private comboColor() { const c = this.names.get(this.me.e)?.combo ?? 0; return c >= this.flameAt * 2 ? '#c77dff' : c >= this.flameAt ? '#ff8a3d' : '#ffe27a'; }
+  /**
+   * 싸움의 순간에 맞는 연출을 낸다(4.39). taken: 내가 키워드를 잃음 · hurt: 내 체력이 깎임 · dealt: 내가 상대를 이김(nick은 진 쪽) ·
+   * kill: 내가 처치함(nick은 죽은 쪽) · death: 내가 죽음
+   */
+  hitReact(kind: 'taken' | 'hurt' | 'dealt' | 'kill' | 'death', nick?: string) {
+    const me = { x: this.me.x, y: this.me.y, r: this.me.r };
+    switch (kind) {
+      case 'taken': this.hitFx.shake(6, 240); this.hitFx.flash('255,60,60', 380, 0.32); this.hitFx.burst(me.x, me.y, me.r, '#ff6b6b', 12); break;
+      case 'hurt': this.hitFx.shake(3.5, 160); this.hitFx.flash('255,60,60', 260, 0.2); break;
+      case 'dealt': { const p = this.posOfNick(nick) ?? me; this.hitFx.shake(3, 130); this.hitFx.burst(p.x, p.y, p.r, this.comboColor(), 16); break; }
+      case 'kill': { const p = this.posOfNick(nick) ?? me; this.hitFx.shake(11, 380); this.hitFx.punch(0.05, 260); this.hitFx.flash('255,255,255', 240, 0.4); this.hitFx.burst(p.x, p.y, p.r, '#ffffff', 22); this.hitFx.burst(p.x, p.y, p.r, this.comboColor(), 22); break; }
+      case 'death': this.hitFx.shake(13, 480); this.hitFx.flash('255,40,40', 800, 0.5); this.hitFx.burst(me.x, me.y, me.r, '#ff5a5a', 30); break;
+    }
+  }
+  /** 화면 위쪽에 크게 뜨는 글자(멀티킬 등) */
+  announce(text: string, color: string, sub?: string) { this.hitFx.announce(text, color, sub); }
   private dashFx = new Map<number, { at: number; ms: number }>(); // 대시 중인 원 번호 → 시작 시각, 지속 ms(4.27)
   /** 대시 중인 원이 지나온 경로(오래된 것 → 최근 것). 꼬리 빛이 이 경로를 따라 휘어지게 한다(4.27). at은 마지막으로 기록한 시각 */
   private dashPaths = new Map<number, { pts: { x: number; y: number; t: number }[]; at: number }>();
@@ -792,16 +825,19 @@ export class Arena {
     ctx.fillStyle = '#0b0f17';
     ctx.fillRect(0, 0, w, h);
     ctx.save();
-    ctx.translate(w / 2, h / 2);
-    ctx.scale(this.zoom, this.zoom);
+    const shake = this.hitFx.shakeOffset(now), punch = this.zoom * this.hitFx.zoomMul(now); // 화면 흔들림·확대 튕김은 그림에만 적용한다(조작 좌표는 그대로)
+    ctx.translate(w / 2 + shake.x, h / 2 + shake.y);
+    ctx.scale(punch, punch);
     ctx.translate(-this.view.x, -this.view.y);
 
     const half = this.half;
-    ctx.fillStyle = '#1f2a37'; // 짙은 회청색 바닥
-    ctx.fillRect(-half, -half, half * 2, half * 2);
+    if (!this.theme.drawFloor(ctx, half, this.view, this.zoom, w, h, now)) {
+      ctx.fillStyle = '#1f2a37'; // 짙은 회청색 바닥
+      ctx.fillRect(-half, -half, half * 2, half * 2);
+    }
     this.zones.draw(ctx, now, this.view, this.zoom, w, h);
     this.drawGrid(ctx, w, h);
-    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.strokeStyle = this.theme.wallColor ?? 'rgba(255,255,255,0.6)';
     ctx.lineWidth = 4 / this.zoom;
     ctx.strokeRect(-half, -half, half * 2, half * 2);
 
@@ -841,8 +877,11 @@ export class Arena {
     this.drawFollowMark(ctx, now);
     this.fx.drawActive(ctx, now, this.zoom, (e, t) => this.entityPos(e, t)); // 충격파·갈고리(4.33)
     this.drawLevelFxs(ctx, now);
+    this.hitFx.drawWorld(ctx, now, this.zoom);
     this.monsters.drawOver(ctx, now, this.zoom); // 퍼지는 충격고리·피해 숫자(4.35)
     ctx.restore();
+    this.theme.drawOverlay(ctx, w, h, now); // 시간대 빛깔·입자·날씨는 월드 그림 위, 화면 가림막·미니맵 아래
+    this.hitFx.drawScreen(ctx, w, h, now); // 번쩍임·큰 글자 배너는 그 위
     const dark = this.isDark(now);
     if (dark) this.drawDarkness(ctx, w, h, now);
     if (!this.spec) this.drawFloatTexts(ctx, w, h, now);
@@ -945,7 +984,7 @@ export class Arena {
     let mul = 1;
     while (GRID_SMALL * mul * this.zoom < 40 && mul < 1024) mul *= 2;
     for (const [step, width] of [[GRID_SMALL * mul, 1], [GRID_BIG * mul, 2]] as const) {
-      ctx.strokeStyle = 'rgba(220,230,255,0.15)';
+      ctx.strokeStyle = this.theme.gridColor ?? 'rgba(220,230,255,0.15)';
       ctx.lineWidth = width / this.zoom;
       ctx.beginPath();
       for (let x = Math.ceil(x0 / step) * step; x <= x1; x += step) { ctx.moveTo(x, y0); ctx.lineTo(x, y1); }
@@ -1127,12 +1166,14 @@ export class Arena {
     const lvl = Math.min(e.level, 10);
     if (e.me) this.meScore = e.score;
     // 옅은 그림자는 shadowBlur 대신 살짝 큰 반투명 원으로 그린다(shadowBlur는 휴대폰에서 매우 느리다)
-    ctx.fillStyle = 'rgba(0,0,0,0.28)';
-    ctx.beginPath(); ctx.arc(e.x, e.y + e.r * 0.05 + 1 / this.zoom, e.r + 3 / this.zoom, 0, Math.PI * 2); ctx.fill();
+    const sh = this.theme.shadow(); // 조명이 켜져 있으면 해(달)의 반대쪽으로 그림자가 드리운다(4.38)
+    ctx.fillStyle = `rgba(0,0,0,${sh ? sh.a : 0.28})`;
+    ctx.beginPath(); ctx.arc(e.x + (sh ? sh.dx * e.r : 0), e.y + (sh ? sh.dy * e.r : e.r * 0.05 + 1 / this.zoom), e.r + 3 / this.zoom, 0, Math.PI * 2); ctx.fill();
     const look = this.names.get(e.e);
     const t = performance.now() / 1000;
     // 콤보 불꽃(4.25): 원보다 먼저 그려 둘레 바깥으로만 타오르게 한다
     if (look && look.combo >= this.flameAt) drawComboFlames(ctx, e.x, e.y, e.r, t, 1 / this.zoom);
+    if (look && !look.bot) drawLevelAura(ctx, e.x, e.y, e.r, e.level, t, 1 / this.zoom); // 레벨 등급 오라(4.40)
     this.drawDashFx(ctx, e, false); // 대시: 빛·속도선·충격파는 원 뒤(4.27)
     // 바탕색: 봇은 빨간색(4.21), 사람은 꾸민 색(10레벨부터, 4.9). 꾸미지 않았으면 성장 캐릭터의 정해진 색
     ctx.fillStyle = look?.bot ? BOT_BASE : look?.bg ?? TURTLE_BASE;

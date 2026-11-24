@@ -68,6 +68,8 @@ export function SidePanel({ onPlused, onError, refreshKey, onOpenKeyword, onShar
   const [card, setCard] = useState<KeywordCard | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [mine, setMine] = useState<MyKeyword[]>([]);
+  const [, minuteTick] = useState(0);
+  useEffect(() => { const id = window.setInterval(() => minuteTick((n) => n + 1), 30_000); return () => window.clearInterval(id); }, []); // 남은 시간 게이지를 30초마다 다시 계산(4.42)
   const [busy, setBusy] = useState(false);
   // 모바일 하단 시트: 접혀 있으면 탭 줄만 보인다. 탭을 누르면 펼치고, 펼친 탭을 다시 누르면 접는다(데스크톱은 늘 펼침)
   const [expanded, setExpanded] = useState(false);
@@ -218,16 +220,7 @@ export function SidePanel({ onPlused, onError, refreshKey, onOpenKeyword, onShar
             </div>
             <ul className="list">
               {sortedMine.map((k) => (
-                <li key={k.keywordId} className="mine-item">
-                  <button className="mine-open" onClick={() => onOpenKeyword(k.keywordId)} aria-label={t('side.openAria', { kw: k.text })}>
-                    <div><strong>{k.text}</strong> <span className="badge">{STATE_BADGE[k.state] ?? k.state}</span></div>
-                    <div className="muted small">
-                      {t('side.points', { n: k.trendValue })} ·{' '}
-                      <span className={new Date(k.expiresAt).getTime() - Date.now() < 3_600_000 ? 'warn' : ''}>{remaining(k.expiresAt)}</span>
-                    </div>
-                    <span className="mine-chevron" aria-hidden="true">›</span>
-                  </button>
-                </li>
+                <MineCard key={k.keywordId} k={k} onOpen={() => onOpenKeyword(k.keywordId)} />
               ))}
             </ul>
           </>)}
@@ -235,5 +228,28 @@ export function SidePanel({ onPlused, onError, refreshKey, onOpenKeyword, onShar
       )}
 
     </aside>
+  );
+}
+
+/**
+ * 보관함 키워드 카드(4.42): 이름·상태 배지·점수 아래에 남은 시간 게이지가 있다. 게이지는 처음 +한 시간(또는 갱신한 시간)부터 사라질 때까지 줄어들고,
+ * 절반 아래는 주황, 1시간 아래는 빨강으로 깜빡이며, 🔥 활성 키워드는 불꽃이 일렁인다. 남은 시간 글자와 같은 값이라 색에만 의존하지 않는다.
+ */
+function MineCard({ k, onOpen }: { k: MyKeyword; onOpen: () => void }) {
+  const left = new Date(k.expiresAt).getTime() - Date.now();
+  const total = Math.max(new Date(k.expiresAt).getTime() - new Date(k.plusedAt).getTime(), left, 1);
+  const ratio = Math.max(0, Math.min(1, left / total));
+  const tone = left < 3_600_000 ? 'urgent' : ratio < 0.5 ? 'mid' : 'ok';
+  return (
+    <li className={`mine-item mine-card ${tone}${k.state === '활성' ? ' hot' : ''}`}>
+      <button className="mine-open" onClick={onOpen} aria-label={t('side.openAria', { kw: k.text })}>
+        <div className="mine-card-head"><strong>{k.state === '활성' && <span className="kw-flame" aria-hidden="true">🔥</span>}{k.text}</strong> <span className="badge">{STATE_BADGE[k.state] ?? k.state}</span></div>
+        <div className="muted small">
+          {t('side.points', { n: k.trendValue })} · <span className={left < 3_600_000 ? 'warn' : ''}>{remaining(k.expiresAt)}</span>
+        </div>
+        <div className="kw-gauge" role="presentation"><i style={{ width: `${(ratio * 100).toFixed(1)}%` }} /></div>
+        <span className="mine-chevron" aria-hidden="true">›</span>
+      </button>
+    </li>
   );
 }

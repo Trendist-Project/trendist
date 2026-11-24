@@ -1,0 +1,16 @@
+export default {
+  title: '소리 설정',
+  master: '마스터 음량',
+  masterDesc: '모든 소리의 전체 크기',
+  sfx: '효과음',
+  sfxDesc: '싸움·키워드 추가·스킬 소리',
+  bgm: '배경음',
+  bgmDesc: '잔잔한 배경 선율',
+  on: '켜짐',
+  off: '꺼짐',
+  test: '들어보기',
+  reset: '기본값으로',
+  volume: '{name} 음량',
+  mutedHint: '마스터 음량이 0이라 소리가 나지 않아요',
+  autoplayHint: '브라우저 규칙상 화면을 한 번 누른 뒤부터 소리가 나요',
+};

@@ -24,7 +24,7 @@ const JOY_DEAD = 8;            // 이보다 덜 끌면 멈춘 것으로 본다(�
 const JOY_INTERVAL_MS = 50;    // 조이스틱 방향은 초당 20회까지 보낸다(끄는 동안 계속 바뀌므로 방향키보다 넉넉하게 묶는다)
 
 type Set<T> = Dispatch<SetStateAction<T>>;
-type Panel = 'notice' | 'guide' | 'profile' | 'skills' | 'wheel' | null;
+type Panel = 'notice' | 'guide' | 'profile' | 'skills' | 'wheel' | 'sound' | null;
 
 export interface GameInputDeps {
   arena: Arena;

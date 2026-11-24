@@ -142,6 +142,7 @@ export type ServerMessage =
   | { type: 'hps'; list: [number, number][] } // 체력바 공개(설정 hp_public)일 때 모두의 체력: [원 번호, %]. 목록에 없는 원은 100%
   | { type: 'hpHit'; e: number; by: number; dmg: number; pct: number } // 맞았다: 맞은 원, 때린 원, 깎인 %(최대 체력 기준), 남은 %
   | { type: 'kill'; target: string } // 내가 상대를 죽였다(4.31)
+  | { type: 'feed'; kind: 'steal' | 'kill'; by: string; byE: number; target: string; tE: number } // 방 전체에 알리는 싸움 소식(4.41): 키워드를 빼앗았다 / 쓰러뜨렸다. 키워드 이름은 싣지 않는다(3.3)
   | { type: 'levelFx'; e: number; level: number } // 레벨업 이펙트(4.30): 그 원에서 빛기둥이 솟는다
   | { type: 'dashFx'; e: number; ms: number } // 누군가 대시를 시작했다(4.27): 그 원에 강조 효과를 그린다
   | { type: 'dash'; ms: number; cooldownMs: number; mult: number } // 대시 시작(4.27): 지속 시간, 다시 쓸 수 있을 때까지, 속도 배수

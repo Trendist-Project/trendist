@@ -1,0 +1,16 @@
+export default {
+  title: 'Sound settings',
+  master: 'Master volume',
+  masterDesc: 'Overall loudness of everything',
+  sfx: 'Sound effects',
+  sfxDesc: 'Fights, adding keywords, skills',
+  bgm: 'Music',
+  bgmDesc: 'Calm background melody',
+  on: 'On',
+  off: 'Off',
+  test: 'Test',
+  reset: 'Reset to default',
+  volume: '{name} volume',
+  mutedHint: 'Master volume is 0, so nothing will play',
+  autoplayHint: 'Browsers only allow sound after you click the page once',
+};
