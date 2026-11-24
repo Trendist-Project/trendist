@@ -259,6 +259,45 @@ class KeywordMergeTest {
         assertThat(holdCount(me)).isEqualTo(hold - 1);
     }
 
+    /** 자동 합성: 받은 키워드를 서버가 무작위로 짝지어 한 번에 모두 합성하고 한 번의 응답으로 돌려준다. 짝이 없는 하나는 남는다. */
+    @Test
+    void autoMergePairsRandomlyAndMergesEverythingInOneCall() throws Exception {
+        List<String> names = List.of("자동합가", "자동합나", "자동합다", "자동합라", "자동합마");
+        for (String n : names) active(n);
+        Me me = player("합성러자동");
+        for (String n : names) plus(me, n);
+        List<Long> ids = names.stream().map(this::idOf).toList();
+        var r = keywordService.autoMerge(me.userId(), ids);
+        assertThat(r.results()).hasSize(2);       // 5장 -> 2쌍
+        assertThat(r.unpaired()).isEqualTo(1);     // 하나는 짝이 없어 남는다
+        assertThat(r.results()).allSatisfy(x -> { assertThat(x.failed()).isFalse(); assertThat(x.keyword().stars()).isEqualTo(2); });
+        var mine = box(me);
+        assertThat(mine).hasSize(3);               // 합성 2개 + 남은 1개
+        assertThat(mine.stream().filter(k -> k.merged()).count()).isEqualTo(2);
+        assertThat(holdCount(me)).isEqualTo(5);    // 보유 수는 구성 원본 수라 그대로
+        // 이미 합성에 쓴 키워드는 가진 목록에서 빠져 다음 자동 합성에는 남은 것만 대상이다
+        assertThat(keywordService.autoMerge(me.userId(), ids).results().size()).isLessThanOrEqualTo(1);
+    }
+
+    /** 자동 합성을 실패·보너스·합성 키워드끼리 포함해 여러 번 돌려도 보관함과 보유 수·구성이 어긋나지 않는다 */
+    @Test
+    void autoMergeKeepsBoxConsistentAcrossRepeatedRounds() throws Exception {
+        List<String> names = new java.util.ArrayList<>();
+        for (int i = 0; i < 40; i++) { names.add("반복합" + (char) ('가' + i)); active(names.get(i)); }
+        Me me = player("합성러반복");
+        for (String n : names) plus(me, n);
+        for (int round = 0; round < 4; round++) {
+            var ids = box(me).stream().map(KeywordDtos.MyKeyword::keywordId).toList();
+            var r = keywordService.autoMerge(me.userId(), ids);
+            var mine = box(me);
+            assertThat(holdCount(me)).as("round " + round).isEqualTo(mine.stream().mapToInt(KeywordDtos.MyKeyword::stars).sum());
+            assertThat(mine).as("round " + round).allSatisfy(k -> {
+                if (k.merged()) assertThat(keywordService.mergedDetail(me.userId(), k.keywordId()).parts()).hasSize(k.stars());
+            });
+            assertThat(r.results()).allSatisfy(x -> assertThat(x.failed() ? x.lost() != null : x.keyword() != null).isTrue());
+        }
+    }
+
     /** 구성 원본은 글자 수가 적은 것부터 이어 붙고, 어느 쪽을 먼저 골라도 같다. */
     @Test
     void partsAreOrderedByLengthAscending() throws Exception {

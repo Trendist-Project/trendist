@@ -54,6 +54,7 @@ public class KeywordServiceImpl implements KeywordService {
     private final KeywordAiRequestRepository aiRequests;
     private final com.trendist.keyword.holding.Holdings holdings;
     private final KeywordMergePartRepository mergeParts;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc; // 자동 합성의 구성 원본 행을 한 번에 넣는 데 쓴다
     private final com.trendist.keyword.memory.HoldingsStore holdingsStore; // 합성 키워드의 구성 원본을 한 번 읽으면 기억해 두는 곳(구성은 바뀌지 않는다)
     private final PlayerRepository players;
     private final PlayerService playerService;
@@ -962,9 +963,11 @@ public class KeywordServiceImpl implements KeywordService {
         playerService.recompute(p);
     }
 
-    private void removeHolding(Player p, Long keywordId, Instant now) {
-        if (keywords.findById(keywordId).map(Keyword::isMerged).orElse(false)) { removeMergedHolding(p, keywordId); return; } // 합성 키워드(4.44)
-        Keyword k = keywords.findByIdForUpdate(keywordId).orElseThrow();
+    private void removeHolding(Player p, Long keywordId, Instant now) { removeHolding(p, keywordId, now, null, true); }
+
+    private void removeHolding(Player p, Long keywordId, Instant now, MergeBatch batch, boolean recompute) {
+        if (keywords.findById(keywordId).map(Keyword::isMerged).orElse(false)) { removeMergedHolding(p, keywordId, batch, recompute); return; } // 합성 키워드(4.44)
+        Keyword k = lockKw(batch, keywordId);
         long oldTrend = k.getTrendValue();
         k.decHolder();
         p.decHold();
@@ -975,8 +978,8 @@ public class KeywordServiceImpl implements KeywordService {
             events.publishEvent(new com.trendist.keyword.support.KeywordPageEvents.Deactivated(k.getId())); // 합성 키워드에서 빼낸다(4.44)
         }
         long newTrend = updateTrend(k);
-        keywords.flush();
-        playerService.recompute(p);
+        if (batch == null) keywords.flush();
+        if (recompute) playerService.recompute(p);
         publishTrendChange(k, oldTrend, newTrend, p.getId());
         events.publishEvent(new GameEvents.HoldingChanged(p.getCountry().getId(), p.getId(), keywordId, false));
     }
@@ -1043,7 +1046,13 @@ public class KeywordServiceImpl implements KeywordService {
     private static final int MAX_BONUS_TRIES = 30;
 
     /** 합성 한 번의 계획: 검증을 마친 재료 두 행과, 이어 붙인(정렬한) 구성 원본·이름. */
-    private record MergePlan(PlayerKeyword rowA, PlayerKeyword rowB, List<Keyword> parts, String text) {}
+    /** decided면 실패·보너스를 이미 굴려 정한 계획이다(묶음 처리는 미리 모두 정해 두고 한꺼번에 읽고 쓴다) */
+    private record MergePlan(PlayerKeyword rowA, PlayerKeyword rowB, List<Keyword> parts, String text, boolean decided, boolean failed, Keyword bonus) {
+        MergePlan(PlayerKeyword rowA, PlayerKeyword rowB, List<Keyword> parts, String text) { this(rowA, rowB, parts, text, false, false, null); }
+        MergePlan decide(boolean failed, Keyword bonus) { return new MergePlan(rowA, rowB, parts, text, true, failed, bonus); }
+        /** 보너스까지 붙은 최종 구성 원본(번호 순) */
+        List<Keyword> finalParts() { if (bonus == null) return parts; List<Keyword> l = new ArrayList<>(parts); l.add(bonus); return MergeKey.sorted(l); }
+    }
 
     private PlayerKeyword heldRow(Player p, long keywordId, Instant now) {
         return holdings.findByPlayerIdAndKeywordId(p.getId(), keywordId).filter(pk -> !pk.isExpired(now))
@@ -1083,6 +1092,20 @@ public class KeywordServiceImpl implements KeywordService {
 
     private List<Keyword> partsOf(Keyword k) {
         return k.isMerged() ? keywords.findAllById(partIdsOf(k.getId())) : List.of(k);
+    }
+
+    /** 합성 키워드의 구성 원본 엔티티(영속성 컨텍스트에 있으면 조회하지 않는다) */
+    private List<Keyword> partKeywordsOf(Keyword merged) {
+        List<Keyword> out = new ArrayList<>();
+        for (Long id : partIdsOf(merged.getId())) keywords.findById(id).ifPresent(out::add);
+        return out;
+    }
+
+    /** 묶음 처리에서 결과 카드를 만든다: 구성 원본을 메모리의 구성 기억과 영속성 컨텍스트에서 읽어 조회를 줄인다 */
+    private KeywordDtos.MyKeyword myKeywordInBatch(PlayerKeyword pk) {
+        Keyword k = pk.getKeyword();
+        if (!k.isMerged()) return myKeyword(pk, Map.of());
+        return myKeyword(pk, Map.of(k.getId(), partsDto(MergeKey.sorted(partKeywordsOf(k)))));
     }
 
     /** 합성할 수 있는지 검사하고 계획을 만든다. 합칠 수 없으면 이유를 담은 ApiException. */
@@ -1149,35 +1172,185 @@ public class KeywordServiceImpl implements KeywordService {
 
     @Override
     @Transactional
+    public KeywordDtos.AutoMergeResult autoMerge(long userId, List<Long> ids) {
+        Player found = playerService.requireCurrent(userId);
+        Player p = players.findByIdForUpdate(found.getId()).orElseThrow(); // 플레이어는 한 번만 잠근다
+        Instant now = Instant.now(clock);
+        assertMergeEnabled();
+        // 요청한 키워드 중 지금 가진 것(만료 전)만, 무작위 순서로
+        List<Long> distinct = new ArrayList<>(new LinkedHashSet<>(ids));
+        Map<Long, PlayerKeyword> held = new HashMap<>();
+        for (PlayerKeyword row : holdings.findByPlayerIdAndKeywordIdIn(p.getId(), distinct)) if (!row.isExpired(now)) held.put(row.getKeyword().getId(), row);
+        List<Long> order = new ArrayList<>(held.keySet());
+        Collections.shuffle(order, ThreadLocalRandom.current());
+        MergeBatch batch = new MergeBatch();
+        // 합성 재료의 구성 원본은 한 번에 읽어 둔다(잠금은 결정이 끝난 뒤 한꺼번에)
+        TreeSet<Long> partIds = new TreeSet<>();
+        for (Long id : order) { Keyword k = held.get(id).getKeyword(); if (k.isMerged()) partIds.addAll(partIdsOf(k.getId())); }
+        if (!partIds.isEmpty()) keywords.findAllById(partIds);
+        // 짝짓기: 순서대로 아직 안 쓴 키워드마다, 뒤에서 합칠 수 있는 첫 키워드와 짝을 짓는다(합칠 수 없으면 건너뛴다)
+        Set<Long> used = new HashSet<>();
+        List<MergePlan> plans = new ArrayList<>();
+        for (int i = 0; i < order.size(); i++) {
+            Long aId = order.get(i);
+            if (used.contains(aId)) continue;
+            Keyword ka = held.get(aId).getKeyword();
+            List<Keyword> partsA = ka.isMerged() ? partKeywordsOf(ka) : List.of(ka);
+            for (int j = i + 1; j < order.size(); j++) {
+                Long bId = order.get(j);
+                if (used.contains(bId)) continue;
+                Keyword kb = held.get(bId).getKeyword();
+                List<Keyword> sorted;
+                try { sorted = checkMergeable(p, ka, partsA, kb, kb.isMerged() ? partKeywordsOf(kb) : List.of(kb)); } catch (ApiException e) { continue; }
+                plans.add(new MergePlan(held.get(aId), held.get(bId), sorted, MergeKey.text(sorted)));
+                used.add(aId); used.add(bId);
+                break;
+            }
+        }
+        // 실패·보너스를 모두 먼저 정한다(보너스 후보는 한 번만 읽는다)
+        plans.replaceAll(plan -> decide(p, plan, now, batch));
+        // 재료·구성 원본·보너스 키워드를 번호 순으로 한 번에 잠근다
+        TreeSet<Long> lockIds = new TreeSet<>(order);
+        lockIds.addAll(partIds);
+        for (MergePlan plan : plans) if (plan.bonus() != null) lockIds.add(plan.bonus().getId());
+        if (!lockIds.isEmpty()) for (Keyword k : keywords.findAllByIdForUpdate(lockIds)) batch.locked.add(k.getId());
+        // 결과가 될 합성 키워드: 이미 있는 것은 한 번에 찾고, 없는 것은 한 문장으로 만든 뒤 다시 찾아 쓴다
+        Country country = p.getCountry();
+        Map<String, List<Keyword>> keyOf = new LinkedHashMap<>();
+        for (MergePlan plan : plans) if (!plan.failed()) { List<Keyword> fp = plan.finalParts(); keyOf.put(MergeKey.identity(fp), fp); }
+        if (!keyOf.isEmpty()) {
+            for (Keyword k : keywords.findByCountryIdAndNormalizedIn(country.getId(), keyOf.keySet())) batch.existing.put(k.getNormalized(), k);
+            Map<String, List<Keyword>> missing = new LinkedHashMap<>();
+            for (var e : keyOf.entrySet()) if (!batch.existing.containsKey(e.getKey())) missing.put(e.getKey(), e.getValue());
+            if (!missing.isEmpty()) {
+                insertMergedKeywords(country, missing, now);
+                List<long[]> partRows = new ArrayList<>();
+                for (Keyword k : keywords.findByCountryIdAndNormalizedIn(country.getId(), missing.keySet())) {
+                    batch.existing.put(k.getNormalized(), k);
+                    List<Keyword> fp = missing.get(k.getNormalized());
+                    for (Keyword part : fp) partRows.add(new long[]{k.getId(), part.getId()});
+                    holdingsStore.registerMerged(k.getId(), fp.stream().map(Keyword::getId).sorted().toList());
+                }
+                insertMergeParts(partRows);
+            }
+            TreeSet<Long> mergedIds = new TreeSet<>();
+            for (Keyword k : batch.existing.values()) mergedIds.add(k.getId());
+            for (Keyword k : keywords.findAllByIdForUpdate(mergedIds)) batch.locked.add(k.getId());
+            for (PlayerKeyword row : holdings.findByPlayerIdAndKeywordIdIn(p.getId(), mergedIds)) batch.oldRows.put(row.getKeyword().getId(), row); // 만료됐지만 남은 행은 재사용
+        }
+        long oldScore = p.getCurrentScore() - p.getLevel();
+        List<KeywordDtos.MergeResult> results = new ArrayList<>(plans.size());
+        for (int i = 0; i < plans.size(); i++) results.add(mergePlanned(p, plans.get(i), now, batch, i == plans.size() - 1)); // 점수·요약은 마지막에 한 번만 계산한다
+        com.trendist.player.dto.PlayerDtos.PlayerSummary summary = playerService.summary(p);
+        long totalGained = (p.getCurrentScore() - p.getLevel()) - oldScore;
+        List<KeywordDtos.MergeResult> finals = new ArrayList<>(results.size());
+        for (int i = 0; i < results.size(); i++) {
+            KeywordDtos.MergeResult r = results.get(i);
+            finals.add(new KeywordDtos.MergeResult(r.keyword(), r.bonus(), r.bonusPart(), i == results.size() - 1 ? totalGained : r.gained(), summary, r.failed(), r.lost()));
+        }
+        return new KeywordDtos.AutoMergeResult(finals, held.size() - used.size(), summary);
+    }
+
+    /** 새 합성 키워드들을 한 문장으로 넣는다(하나씩 넣으면 합성 수만큼 SQL이 늘어난다). 번호는 넣은 뒤 normalized로 다시 읽어 얻는다 */
+    private void insertMergedKeywords(Country country, Map<String, List<Keyword>> merged, Instant now) {
+        long sourceId = codes.dataSource(DataSource.INTERNAL).getId(), stateId = codes.keywordStateId(CodeTables.KW_ACTIVE);
+        java.sql.Timestamp ts = java.sql.Timestamp.from(now);
+        Calendar utc = Calendar.getInstance(TimeZone.getTimeZone("UTC")); // 엔티티와 같이 UTC로 저장한다(hibernate.jdbc.time_zone)
+        List<Map.Entry<String, List<Keyword>>> list = new ArrayList<>(merged.entrySet());
+        for (int i = 0; i < list.size(); i += 200) {
+            List<Map.Entry<String, List<Keyword>>> chunk = list.subList(i, Math.min(list.size(), i + 200));
+            StringBuilder sql = new StringBuilder("insert into keywords (country_id, data_source_id, keyword_state_id, text, normalized, trend_value, search_count, add_count, holder_count, view_count, activated_at, is_merged, star_count, created_at, updated_at) values ");
+            for (int k = 0; k < chunk.size(); k++) sql.append(k == 0 ? "(?,?,?,?,?,?,0,0,0,0,?,1,?,?,?)" : ",(?,?,?,?,?,?,0,0,0,0,?,1,?,?,?)");
+            try {
+                jdbc.update(sql.toString(), ps -> {
+                    int n = 1;
+                    for (var e : chunk) {
+                        List<Keyword> fp = e.getValue();
+                        ps.setLong(n++, country.getId()); ps.setLong(n++, sourceId); ps.setLong(n++, stateId);
+                        ps.setString(n++, MergeKey.text(fp)); ps.setString(n++, e.getKey()); ps.setLong(n++, mergedValueOf(fp));
+                        ps.setTimestamp(n++, ts, utc); ps.setInt(n++, fp.size()); ps.setTimestamp(n++, ts, utc); ps.setTimestamp(n++, ts, utc);
+                    }
+                });
+            } catch (DataIntegrityViolationException ex) {
+                throw ApiException.conflict("RETRY", "잠시 후 다시 시도해 주세요"); // 같은 합성을 동시에 만들었다
+            }
+        }
+    }
+
+    /** 새 합성 키워드들의 구성 원본 행을 한 문장으로 넣는다(행마다 넣으면 합성 수만큼 SQL이 늘어난다) */
+    private void insertMergeParts(List<long[]> rows) {
+        if (rows.isEmpty()) return;
+        for (int i = 0; i < rows.size(); i += 500) {
+            List<long[]> part = rows.subList(i, Math.min(rows.size(), i + 500));
+            StringBuilder sql = new StringBuilder("insert into keyword_merge_parts (keyword_id, part_keyword_id) values ");
+            List<Object> args = new ArrayList<>();
+            for (int k = 0; k < part.size(); k++) { sql.append(k == 0 ? "(?,?)" : ",(?,?)"); args.add(part.get(k)[0]); args.add(part.get(k)[1]); }
+            jdbc.update(sql.toString(), args.toArray());
+        }
+    }
+
+    @Override
+    @Transactional
     public KeywordDtos.MergeResult merge(long userId, long firstId, long secondId) {
         Player found = playerService.requireCurrent(userId);
         Player p = players.findByIdForUpdate(found.getId()).orElseThrow(); // 잠금 순서: 플레이어 → 구성 원본(번호 순) → 합성 키워드(번호 순)
         Instant now = Instant.now(clock);
         MergePlan plan = planMerge(p, firstId, secondId, now);
-        Country country = p.getCountry();
+        return mergePlanned(p, plan, now, null, true);
+    }
 
-        // 실패(밸런스): 결과 성에 비례한 확률로 합성이 깨져, 재료 중 점수가 낮은 쪽이 사라진다(점수가 같으면 무작위). 분해→재합성으로 보너스를 계속 뽑는 걸 막는다
-        if (ThreadLocalRandom.current().nextDouble(100) < formula.mergeFailPercent(plan.parts().size())) return failMerge(p, plan, now);
+    /**
+     * 자동 합성처럼 한 요청에서 여러 합성을 처리할 때 쓰는 묶음 정보: 재료 키워드를 번호 순으로 한 번에 잠가 읽어 두고(locked), 이미 있는 합성 키워드를 한 번에 찾아 두며(existing),
+     * 새 합성 키워드와 그 구성 원본 행은 한 문장으로 넣는다. 합성마다 조회·잠금·저장을 반복하지 않게 한다.
+     */
+    private static final class MergeBatch {
+        final Set<Long> locked = new HashSet<>();
+        final Map<String, Keyword> existing = new HashMap<>();
+        final Map<Long, PlayerKeyword> oldRows = new HashMap<>(); // 합성 결과 키워드의 (만료된 것 포함) 기존 보관함 행
+        Set<Long> covered; // 이미 가진 것으로 치는 키워드 번호(보너스 후보에서 뺀다)
+        List<Keyword> pool; // 보너스 후보(🔥활성 일반 키워드) 전체, 한 번만 읽는다
+    }
 
-        // +1성 보너스(4.44): 결과 성이 높을수록 낮은 확률로, 글자 수가 허용되는 🔥활성 키워드 중 하나가 덤으로 붙는다
+    /** 이미 잠가서 읽어 둔 키워드는 영속성 컨텍스트에서 가져오고(조회 없음), 아니면 잠그며 읽는다 */
+    private Keyword lockKw(MergeBatch batch, long id) {
+        if (batch != null && batch.locked.contains(id)) return keywords.findById(id).orElseThrow();
+        return keywords.findByIdForUpdate(id).orElseThrow();
+    }
+
+    /**
+     * 실패·보너스를 굴린다. 실패(밸런스): 결과 성에 비례한 확률로 합성이 깨져, 재료 중 점수가 낮은 쪽이 사라진다(점수가 같으면 무작위). 분해→재합성으로 보너스를 계속 뽑는 걸 막는다.
+     * +1성 보너스(4.44): 결과 성이 높을수록 낮은 확률로, 글자 수가 허용되는 🔥활성 키워드 중 하나가 덤으로 붙는다.
+     */
+    private MergePlan decide(Player p, MergePlan plan, Instant now, MergeBatch batch) {
+        if (ThreadLocalRandom.current().nextDouble(100) < formula.mergeFailPercent(plan.parts().size())) return plan.decide(true, null);
         Keyword bonus = null;
         double pct = formula.mergeBonusPercent(plan.parts().size());
-        if (pct > 0 && ThreadLocalRandom.current().nextDouble(100) < pct) bonus = pickBonus(p, plan, now);
+        if (pct > 0 && ThreadLocalRandom.current().nextDouble(100) < pct) bonus = pickBonus(p, plan, now, batch);
+        return plan.decide(false, bonus);
+    }
+
+    /** 합성 한 쌍을 실제로 처리한다. batch가 있으면 묶음 처리(조회·점수 계산을 줄인다), recompute가 false면 점수·요약은 호출한 쪽이 마지막에 한 번만 계산한다 */
+    private KeywordDtos.MergeResult mergePlanned(Player p, MergePlan plan, Instant now, MergeBatch batch, boolean recompute) {
+        Country country = p.getCountry();
+        if (!plan.decided()) plan = decide(p, plan, now, batch);
+        if (plan.failed()) return failMerge(p, plan, now, batch, recompute);
+        Keyword bonus = plan.bonus();
         List<Keyword> parts = new ArrayList<>(plan.parts());
         if (bonus != null) parts.add(bonus);
 
         long oldScore = p.getCurrentScore() - p.getLevel();
         Map<Long, Keyword> lockedParts = new TreeMap<>();
-        for (Keyword k : parts) lockedParts.put(k.getId(), keywords.findByIdForUpdate(k.getId()).orElseThrow());
+        for (Keyword k : parts) lockedParts.put(k.getId(), lockKw(batch, k.getId()));
         List<Keyword> sorted = MergeKey.sorted(lockedParts.values());
-        Keyword target = findOrCreateMerged(country, sorted, now);
+        Keyword target = findOrCreateMerged(country, sorted, now, batch);
         // 합성 키워드 행 잠금(번호 순): 결과 합성 키워드와 재료였던 합성 키워드
         TreeSet<Long> mergedIds = new TreeSet<>();
         mergedIds.add(target.getId());
         List<PlayerKeyword> rows = List.of(plan.rowA(), plan.rowB());
         for (PlayerKeyword row : rows) if (row.getKeyword().isMerged()) mergedIds.add(row.getKeyword().getId());
         Map<Long, Keyword> lockedMerged = new HashMap<>();
-        for (Long id : mergedIds) lockedMerged.put(id, keywords.findByIdForUpdate(id).orElseThrow());
+        if (batch != null) batch.locked.add(target.getId()); // 방금 만든(또는 찾은) 합성 키워드
+        for (Long id : mergedIds) lockedMerged.put(id, lockKw(batch, id));
         target = lockedMerged.get(target.getId());
 
         // 재료 둘을 지운다. 구성 원본의 가진 사람 수는 합성으로 가진 것도 세므로 그대로이고, 재료였던 합성 키워드는 그 행의 보유자만 줄인다
@@ -1188,9 +1361,9 @@ public class KeywordServiceImpl implements KeywordService {
             if (k.isMerged()) lockedMerged.get(k.getId()).decHolder();
             holdings.delete(row);
         }
-        holdings.flush();
+        if (batch == null) holdings.flush();
         Instant expires = now.plus(Duration.ofHours(settings.getInt(SettingKeys.MERGE_EXPIRE_HOURS)));
-        Optional<PlayerKeyword> old = holdings.findByPlayerIdAndKeywordId(p.getId(), target.getId()); // 만료됐지만 남은 행이 있으면 재사용
+        Optional<PlayerKeyword> old = batch != null ? Optional.ofNullable(batch.oldRows.get(target.getId())) : holdings.findByPlayerIdAndKeywordId(p.getId(), target.getId()); // 만료됐지만 남은 행이 있으면 재사용
         PlayerKeyword newRow;
         if (old.isPresent()) { old.get().renew(now, expires); newRow = old.get(); }
         else newRow = holdings.save(new PlayerKeyword(p, target, now, expires));
@@ -1202,35 +1375,34 @@ public class KeywordServiceImpl implements KeywordService {
             b.incHolder();
             p.incHold();
             long nw = updateTrend(b);
-            keywords.flush();
+            if (batch == null) keywords.flush();
             publishTrendChange(b, oldTrend, nw, p.getId());
         }
-        keywords.flush();
-        holdings.flush();
-        long newScore = playerService.recompute(p);
+        if (batch == null) { keywords.flush(); holdings.flush(); }
+        long newScore = recompute ? playerService.recompute(p) : p.getCurrentScore();
         for (Long id : removedIds) events.publishEvent(new GameEvents.HoldingChanged(country.getId(), p.getId(), id, false));
         events.publishEvent(new GameEvents.HoldingChanged(country.getId(), p.getId(), target.getId(), true));
         long gained = (newScore - p.getLevel()) - oldScore;
-        return new KeywordDtos.MergeResult(myKeyword(newRow), bonus != null,
-                bonus == null ? null : partDto(bonus), gained, playerService.summary(p), false, null);
+        KeywordDtos.MyKeyword mine = batch == null ? myKeyword(newRow) : myKeywordInBatch(newRow);
+        return new KeywordDtos.MergeResult(mine, bonus != null, bonus == null ? null : partDto(bonus), gained, recompute ? playerService.summary(p) : null, false, null);
     }
 
     /** 합성 실패: 재료 둘 중 점수가 낮은 쪽을 보관함에서 지운다(합성 키워드면 구성 원본째 사라진다). 나머지 재료는 그대로다. 플레이어를 잠근 상태에서 부른다. */
-    private KeywordDtos.MergeResult failMerge(Player p, MergePlan plan, Instant now) {
+    private KeywordDtos.MergeResult failMerge(Player p, MergePlan plan, Instant now, MergeBatch batch, boolean recompute) {
         long oldScore = p.getCurrentScore() - p.getLevel();
         PlayerKeyword a = plan.rowA(), b = plan.rowB();
         long ta = a.getKeyword().getTrendValue(), tb = b.getKeyword().getTrendValue();
         PlayerKeyword loser = ta < tb ? a : tb < ta ? b : (ThreadLocalRandom.current().nextBoolean() ? a : b);
         Keyword lk = loser.getKeyword();
         KeywordDtos.LostMaterial lost = new KeywordDtos.LostMaterial(
-                lk.isMerged() ? MergeKey.display(MergeKey.sorted(keywords.findAllById(partIdsOf(lk.getId())))) : lk.getText(), Math.max(1, lk.getStarCount()), lk.getTrendValue());
+                lk.isMerged() ? MergeKey.display(MergeKey.sorted(partKeywordsOf(lk))) : lk.getText(), Math.max(1, lk.getStarCount()), lk.getTrendValue());
         Long lostId = lk.getId();
         holdings.delete(loser);
-        holdings.flush();
-        removeHolding(p, lostId, now); // 합성 키워드면 구성 원본의 가진 사람 수·보유 수까지 정리한다
-        keywords.flush();
-        long newScore = playerService.recompute(p);
-        return new KeywordDtos.MergeResult(null, false, null, (newScore - p.getLevel()) - oldScore, playerService.summary(p), true, lost);
+        if (batch == null) holdings.flush();
+        removeHolding(p, lostId, now, batch, recompute); // 합성 키워드면 구성 원본의 가진 사람 수·보유 수까지 정리한다
+        if (batch == null) keywords.flush();
+        long newScore = recompute ? playerService.recompute(p) : p.getCurrentScore();
+        return new KeywordDtos.MergeResult(null, false, null, (newScore - p.getLevel()) - oldScore, recompute ? playerService.summary(p) : null, true, lost);
     }
 
     /** +1성 보너스 후보(4.44): 같은 나라의 🔥활성 일반 키워드 중 이어 붙인 글자 수가 허용 범위 안이고 내가 (직접·합성으로) 갖고 있지 않은 것. */
@@ -1249,7 +1421,8 @@ public class KeywordServiceImpl implements KeywordService {
     }
 
     /** 후보 중 균등 무작위 하나(금지어가 생기는 후보는 건너뛴다). 없으면 null이라 보너스 없이 끝난다. */
-    private Keyword pickBonus(Player p, MergePlan plan, Instant now) {
+    private Keyword pickBonus(Player p, MergePlan plan, Instant now, MergeBatch batch) {
+        if (batch != null) return pickBonusInBatch(p, plan, now, batch);
         List<Long> ids = new ArrayList<>(bonusCandidates(p, plan.parts(), plan.text(), now));
         Collections.shuffle(ids, ThreadLocalRandom.current());
         String countryCode = p.getCountry().getCode();
@@ -1267,9 +1440,48 @@ public class KeywordServiceImpl implements KeywordService {
         return null;
     }
 
+    /** 묶음 처리의 보너스 고르기: 가진 것·후보 전체를 처음 한 번만 읽고(조회 2번), 이후 쌍마다는 메모리에서 무작위로 고른다 */
+    private Keyword pickBonusInBatch(Player p, MergePlan plan, Instant now, MergeBatch batch) {
+        if (batch.pool == null) {
+            batch.covered = heldCoveredIds(p.getId(), now);
+            List<Long> ids = new ArrayList<>();
+            for (Object[] r : keywords.findMergeBonusPool(p.getCountry().getId(), codes.keywordStateId(CodeTables.KW_ACTIVE))) {
+                long id = ((Number) r[0]).longValue();
+                if (!batch.covered.contains(id)) ids.add(id);
+            }
+            Collections.shuffle(ids, ThreadLocalRandom.current());
+            batch.pool = ids.isEmpty() ? List.of() : new ArrayList<>(keywords.findAllById(ids.subList(0, Math.min(ids.size(), 1500))));
+            Collections.shuffle(batch.pool, ThreadLocalRandom.current());
+        }
+        List<Keyword> pool = batch.pool;
+        if (pool.isEmpty()) return null;
+        Set<Long> own = new HashSet<>();
+        for (Keyword k : plan.parts()) own.add(k.getId());
+        int used = MergeKey.length(plan.text()), start = ThreadLocalRandom.current().nextInt(pool.size()), banned = 0;
+        String countryCode = p.getCountry().getCode();
+        for (int i = 0; i < pool.size() && banned < MAX_BONUS_TRIES; i++) {
+            Keyword c = pool.get((start + i) % pool.size());
+            if (c.isMerged() || !isState(c, CodeTables.KW_ACTIVE) || batch.covered.contains(c.getId()) || own.contains(c.getId())) continue;
+            if (used + MergeKey.length(c.getText()) > MergeKey.MAX_TEXT_LENGTH) continue;
+            List<Keyword> with = new ArrayList<>(plan.parts());
+            with.add(c);
+            if (bannedWords.contains(countryCode, MergeKey.joinedNormalized(MergeKey.sorted(with)))) { banned++; continue; }
+            batch.covered.add(c.getId()); // 이 합성으로 가진 것이 되었으니 다음 쌍의 후보에서 뺀다
+            return c;
+        }
+        return null;
+    }
+
     /** 같은 구성의 합성 키워드를 찾고, 없으면 만든다(4.44). 합성 키워드의 상태는 항상 🔥활성, 반영 소스는 internal이다. */
-    private Keyword findOrCreateMerged(Country country, List<Keyword> sortedParts, Instant now) {
+    private Keyword findOrCreateMerged(Country country, List<Keyword> sortedParts, Instant now) { return findOrCreateMerged(country, sortedParts, now, null); }
+
+    private Keyword findOrCreateMerged(Country country, List<Keyword> sortedParts, Instant now, MergeBatch batch) {
         String key = MergeKey.identity(sortedParts);
+        if (batch != null) { // 묶음에서는 필요한 합성 키워드를 미리 한꺼번에 찾거나 만들어 두었다
+            Keyword m = batch.existing.get(key);
+            if (m == null) throw new IllegalStateException("merged keyword not prepared: " + key);
+            return m;
+        }
         Optional<Keyword> found = keywords.findByCountryIdAndNormalized(country.getId(), key);
         if (found.isPresent()) return found.get();
         Keyword m = Keyword.merged(country, codes.dataSource(DataSource.INTERNAL), codes.keywordState(CodeTables.KW_ACTIVE),
@@ -1282,7 +1494,7 @@ public class KeywordServiceImpl implements KeywordService {
         for (Keyword part : sortedParts) mergeParts.save(new KeywordMergePart(m.getId(), part.getId()));
         mergeParts.flush();
         holdingsStore.registerMerged(m.getId(), sortedParts.stream().map(Keyword::getId).sorted().toList()); // 만든 구성을 바로 기억해 둔다
-        updateTrend(m);
+        m.setTrendValue(mergedValueOf(sortedParts));
         return m;
     }
 
@@ -1464,10 +1676,12 @@ public class KeywordServiceImpl implements KeywordService {
      * 합성 보관함 행 하나가 통째로 사라질 때(만료·금지·모두 잃기): 구성 원본마다 가진 사람 수와 보유 키워드 수를 줄이고
      * 💤 전환·점수를 고친다. 행은 이미 지운 상태에서 부른다. 잠금 순서: 구성 원본(번호 순) → 합성 키워드.
      */
-    private void removeMergedHolding(Player p, Long mergedId) {
+    private void removeMergedHolding(Player p, Long mergedId) { removeMergedHolding(p, mergedId, null, true); }
+
+    private void removeMergedHolding(Player p, Long mergedId, MergeBatch batch, boolean recompute) {
         Instant now = Instant.now(clock);
         for (Long partId : partIdsOf(mergedId)) {
-            Keyword part = keywords.findByIdForUpdate(partId).orElse(null);
+            Keyword part = lockKw(batch, partId);
             if (part == null) continue;
             long oldTrend = part.getTrendValue();
             part.decHolder();
@@ -1480,9 +1694,9 @@ public class KeywordServiceImpl implements KeywordService {
             long nw = updateTrend(part);
             publishTrendChange(part, oldTrend, nw, p.getId());
         }
-        keywords.findByIdForUpdate(mergedId).orElseThrow().decHolder();
-        keywords.flush();
-        playerService.recompute(p);
+        lockKw(batch, mergedId).decHolder();
+        if (batch == null) keywords.flush();
+        if (recompute) playerService.recompute(p);
         events.publishEvent(new GameEvents.HoldingChanged(p.getCountry().getId(), p.getId(), mergedId, false));
     }
 
@@ -1561,6 +1775,13 @@ public class KeywordServiceImpl implements KeywordService {
     }
 
     /** 합성 키워드의 점수(4.44): 구성 원본(1성) 키워드 점수의 합 × 별 개수. 💤·금지 원본은 점수가 0이라 보태지 않는다. */
+    /** 구성 원본 엔티티로 합성 키워드의 점수를 구한다(조회 없음) */
+    private long mergedValueOf(List<Keyword> parts) {
+        long sum = 0;
+        for (Keyword part : parts) sum += part.getTrendValue();
+        return formula.mergedValue(sum, parts.size());
+    }
+
     private long mergedTrend(Keyword m) {
         long sum = 0;
         int stars = 0;

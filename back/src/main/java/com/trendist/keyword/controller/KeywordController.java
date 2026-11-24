@@ -66,6 +66,11 @@ public class KeywordController {
         return service.mergeBlocked(user.userId(), from);
     }
 
+    @PostMapping("/me/keywords/auto-merge")
+    public KeywordDtos.AutoMergeResult autoMerge(@AuthenticationPrincipal AuthUser user, @Valid @RequestBody KeywordDtos.AutoMergeRequest req) {
+        return service.autoMerge(user.userId(), req.ids());
+    }
+
     @PostMapping("/me/keywords/merge")
     public KeywordDtos.MergeResult merge(@AuthenticationPrincipal AuthUser user, @Valid @RequestBody KeywordDtos.MergeRequest req) {
         return service.merge(user.userId(), req.first(), req.second());

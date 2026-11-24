@@ -5,6 +5,7 @@ export default {
   sortState: '상태',
   sortTrend: '트렌드 점수',
   sortLength: '글자 수',
+  autoScopeAll: '전체',
   loadingMore: '더 불러오는 중… (남은 {n}개)',
   banned: '검색할 수 없는 키워드예요',
   searchFailed: '검색하지 못했어요',

@@ -1,8 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
+import { Modal } from './Modal';
 import { api, ApiFailure } from '../api/client';
 import { applySideVars, clampSideH, clampSideW, loadSideHeight, loadSideWidth, saveSideSize, SIDE_H_MIN, SIDE_W_MIN, sideHMax, sideWMax } from './gamePrefs';
-import type { KeywordCard, MergeResult, MyKeyword, PlayerSummary } from '../api/types';
+import type { AutoMergeResult, KeywordCard, MergeResult, MyKeyword, PlayerSummary } from '../api/types';
 import { remaining, shortLeft, STATE_BADGE } from './keywordFormat';
 import { fmtNumber, t } from '../i18n';
 import { getLang } from '../country';
@@ -516,6 +517,40 @@ function SidePanelImpl({ onPlused, onMerged, onError, refreshKey, onOpenKeyword,
   }, [shown, sortedMine.length, mineMounted, tab]);
 
   // 카드(memo)에 넘기는 핸들러는 늘 같은 함수여야 카드가 다시 그려지지 않는다. 최신 상태는 ref를 거쳐 읽는다
+  // ---- 자동 합성: 지금 보이는 목록(정렬·별 필터 적용)의 키워드를 한 번의 요청으로 보내면 서버가 무작위로 짝지어 한꺼번에 합성하고 결과를 한 번에 돌려준다
+  const [auto, setAuto] = useState<{ phase: 'run' } | null>(null); // 확인 단계 없이 버튼을 누르면 바로 시작한다
+  const [autoReport, setAutoReport] = useState<AutoMergeResult | null>(null); // 끝나면 결과를 별도 창으로 보여 준다
+  const autoScope = activeStars.length === 0 ? t('side.autoScopeAll') : activeStars.map((s) => `★${s}`).join('·');
+  const autoCount = sortedMine.filter((k) => k.state === '활성').length;
+
+  const runAuto = async () => {
+    if (merging.current) return;
+    const ids = sortedMine.filter((k) => k.state === '활성').map((k) => k.keywordId);
+    if (ids.length < 2) { setAuto(null); return; }
+    merging.current = true;
+    setAuto({ phase: 'run' });
+    mineEdits.current++; // 요청 전에 시작한 보관함 읽기는 낡은 값이므로 버린다
+    setPendingMerge(t('merge.autoPending', { n: ids.length }));
+    try {
+      const r = await api.autoMerge(ids);
+      const last = r.results[r.results.length - 1];
+      mineEdits.current++;
+      const fresh = await api.myKeywords(); // 합성된 것·사라진 것을 서버 값으로 한 번에 맞춘다
+      setMine((prev) => reconcileMine(prev, fresh));
+      if (last) onMerged({ ...last, player: r.player }); // 결과 카드·점수는 마지막 합성 하나만 보여 준다(합성마다 띄우면 번거롭다)
+      if (r.results.length === 0) onError(t('merge.autoNone'));
+      else setAutoReport(r);
+    } catch (e) {
+      onError(e instanceof ApiFailure ? e.message : t('merge.failed'));
+      mineEdits.current++;
+      void loadMine();
+    } finally {
+      merging.current = false;
+      setPendingMerge(null);
+      setAuto(null);
+    }
+  };
+
   const live = useRef({
     open: (_k: MyKeyword) => {}, link: (_k: MyKeyword) => {}, pick: (_k: MyKeyword) => {}, linkDown: (_e: ReactPointerEvent, _k: MyKeyword) => {}, dragStart: (_e: ReactPointerEvent, _k: MyKeyword) => {},
   });
@@ -617,6 +652,11 @@ function SidePanelImpl({ onPlused, onMerged, onError, refreshKey, onOpenKeyword,
                 </ScrollRow>
               )}
             </div>
+            {mergeFrom === null && (auto === null && autoCount >= 2 ? (
+              <div className="auto-merge">
+                <button type="button" className="auto-merge-btn" onClick={() => { void runAuto(); }} title={t('merge.autoTitle')}>{t('merge.auto')} <span className="muted">({autoScope} · {t('merge.autoCount', { n: autoCount })})</span></button>
+              </div>
+            ) : null)}
             <ul className={source != null ? 'list merge-active' : 'list'}>
               {pendingMerge !== null && (
                 <li className="mine-item mine-card merge-source mine-pending" role="status" aria-live="polite">
@@ -642,6 +682,7 @@ function SidePanelImpl({ onPlused, onMerged, onError, refreshKey, onOpenKeyword,
         </div>
       )}
 
+      {autoReport && createPortal(<AutoMergeReport r={autoReport} onClose={() => setAutoReport(null)} />, document.body)}
       {drag && createPortal(<div className="merge-ghost" style={{ left: drag.x + 12, top: drag.y + 12 }} aria-hidden="true">{mineById.get(drag.id)?.merged ? `${starLabel(mineById.get(drag.id)!.stars)} ` : ''}{mineById.get(drag.id)?.text}</div>, document.body)}
     </aside>
   );
@@ -712,3 +753,31 @@ const MineCard = memo(function MineCard({ k, mins, role, reason, failPct, over, 
     </li>
   );
 });
+
+/** 자동 합성 결과 창: 성공·실패 수, 얻은 점수, 합쳐진 키워드와 잃은 재료를 한눈에 */
+function AutoMergeReport({ r, onClose }: { r: AutoMergeResult; onClose(): void }) {
+  const ok = r.results.filter((x) => !x.failed && x.keyword);
+  const failed = r.results.length - ok.length;
+  const gained = r.results.reduce((n, x) => n + x.gained, 0);
+  return (
+    <Modal title={t('merge.autoReportTitle')} onClose={onClose} className="auto-report">
+      <div className="auto-report-stats">
+        <span className="auto-report-stat ok"><b>{ok.length}</b>{t('merge.autoReportOk')}</span>
+        <span className="auto-report-stat fail"><b>{failed}</b>{t('merge.autoReportFail')}</span>
+        <span className="auto-report-stat"><b>+{fmtNumber(gained)}</b>{t('merge.autoReportGained')}</span>
+        {r.unpaired > 0 && <span className="auto-report-stat muted"><b>{r.unpaired}</b>{t('merge.autoReportLeft')}</span>}
+      </div>
+      <ul className="auto-report-list">
+        {r.results.map((x, i) => (
+          <li key={i} className={x.failed || !x.keyword ? 'fail' : 'ok'}>
+            {x.failed || !x.keyword
+              ? <span>{t('merge.autoReportLost', { name: x.lost?.text ?? '?' })}</span>
+              : <span>{starLabel(x.keyword.stars)} <b>{x.keyword.text}</b>{x.bonus && x.bonusPart ? <em> ✨ +{x.bonusPart.text}</em> : null}</span>}
+            <span className="muted">{x.failed || !x.keyword ? (x.lost ? `−${fmtNumber(x.lost.trendValue)}` : '') : `+${fmtNumber(x.gained)}`}</span>
+          </li>
+        ))}
+      </ul>
+      <button type="button" className="auto-merge-btn" onClick={onClose}>{t('dialogs.close')}</button>
+    </Modal>
+  );
+}

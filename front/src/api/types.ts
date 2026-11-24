@@ -85,6 +85,8 @@ export interface MergePreview {
   expireHours: number; length: number; maxLength: number; bonusPercent: number; bonusPossible: boolean; parts: MergedPart[];
 }
 /** 실패하면 failed가 true이고 keyword는 null, lost는 사라진 재료(점수가 낮은 쪽) */
+/** 자동 합성 결과: 짝마다 합성 결과, 짝을 못 지어 남은 수, 갱신된 플레이어 요약 */
+export interface AutoMergeResult { results: MergeResult[]; unpaired: number; player: PlayerSummary }
 export interface MergeResult { keyword: MyKeyword | null; bonus: boolean; bonusPart: MergedPart | null; gained: number; player: PlayerSummary; failed: boolean; lost: { text: string; stars: number; trendValue: number } | null }
 /** 합성 키워드 상세 창(4.44): parts는 구성 원본의 일반 키워드 카드 */
 export interface MergedDetail {

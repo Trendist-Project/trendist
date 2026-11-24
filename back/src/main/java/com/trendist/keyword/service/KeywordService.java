@@ -33,6 +33,12 @@ public interface KeywordService {
     /** 합성(4.44): 🔥활성 보관함 키워드 둘을 합쳐 ★ 합성 키워드 하나로 바꾼다. 일정 확률로 +1성 보너스가 붙는다. */
     KeywordDtos.MergeResult merge(long userId, long firstId, long secondId);
 
+    /**
+     * 자동 합성: 받은 보관함 키워드들을 서버가 무작위로 짝지어(한 키워드는 한 짝에만, 합칠 수 있는 짝만) 한 번에 모두 합성하고 결과를 한 번에 돌려준다.
+     * 짝을 못 지은 키워드는 그대로 남는다(unpaired). 합성마다 실패 확률·보너스가 따로 적용된다.
+     */
+    KeywordDtos.AutoMergeResult autoMerge(long userId, List<Long> ids);
+
     /** 합성 키워드 상세 창(4.44): 구성 원본 키워드 카드를 한 번에. 내 나라의 합성 키워드면 누구의 것이든 볼 수 있다. */
     KeywordDtos.MergedDetail mergedDetail(long userId, long keywordId);
 

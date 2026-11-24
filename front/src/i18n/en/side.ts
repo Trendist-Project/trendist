@@ -5,6 +5,7 @@ export default {
   sortState: 'Status',
   sortTrend: 'Trend score',
   sortLength: 'Length',
+  autoScopeAll: 'All',
   loadingMore: 'Loading more… ({n} left)',
   banned: "That keyword can't be searched",
   searchFailed: "Couldn't search",

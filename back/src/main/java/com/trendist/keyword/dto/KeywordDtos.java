@@ -36,6 +36,12 @@ public final class KeywordDtos {
     /** 합성에 실패해 사라진 재료(점수가 낮은 쪽). 합성 키워드면 stars가 2 이상이다. */
     public record LostMaterial(String text, int stars, long trendValue) {}
 
+    /** 자동 합성 요청: 합성할 보관함 키워드 번호들(서버가 무작위로 짝을 짓는다) */
+    public record AutoMergeRequest(@jakarta.validation.constraints.NotNull @jakarta.validation.constraints.Size(min = 2, max = 200) List<Long> ids) {}
+
+    /** 자동 합성 결과: 짝마다 합성 결과(성공·실패), 짝을 못 지어 남은 키워드 수, 갱신된 플레이어 요약 */
+    public record AutoMergeResult(List<MergeResult> results, int unpaired, PlayerDtos.PlayerSummary player) {}
+
     public record MergeRequest(@jakarta.validation.constraints.NotNull Long first, @jakarta.validation.constraints.NotNull Long second) {}
 
     /** 합성 키워드 상세 창(4.44): 요약 + 구성 원본 카드. expiresAt은 내가 가진 합성일 때만. */

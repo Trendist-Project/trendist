@@ -4,7 +4,7 @@ import { getAdminCountry } from './adminCountry';
 import type { UiPrefsResponse } from './types';
 import type { ThemeConfig } from '../game/theme/ThemeLayer';
 import type {
-  WheelStatus, WheelSpinResult, Activity, ActivityRange, PlayerCard, PlayerHit, PopularityResult, ScoreHistory, ScoreRange, CommentItem, CommentPage, GuideArticle, GuideCategory, KeywordCard, GradeInfo, Me, MyKeyword, MergePreview, MergeResult, MergedDetail, Notice, PlayerSummary, 
+  WheelStatus, WheelSpinResult, Activity, ActivityRange, PlayerCard, PlayerHit, PopularityResult, ScoreHistory, ScoreRange, CommentItem, CommentPage, GuideArticle, GuideCategory, KeywordCard, GradeInfo, Me, MyKeyword, MergePreview, MergeResult, AutoMergeResult, MergedDetail, Notice, PlayerSummary, 
   AiCommentPage, AiCommentRow, EmergencyNotice, Look, LevelBadge, PixelArtData, ProfileBox, ProfileSave, ShareCardCreated, PlusResult, RankingEntry, SearchResult, TitleBox, TokenResponse, VoteResult, SkillInfo, KeybindingsResponse } from './types';
 
 /** 소리 설정(4.39): 켜짐과 음량(0~100) */
@@ -177,6 +177,8 @@ export const api = {
   mergePreview: (a: number, b: number) => request<MergePreview>('GET', `/api/me/keywords/merge-preview?a=${a}&b=${b}`),
   /** 합성 불가 목록(4.44): from과 합칠 수 없는 보관함 키워드의 번호 → 이유. 합칠 수 있는 것은 없다 */
   mergeBlocked: (from: number) => request<Record<number, string>>('GET', `/api/me/keywords/merge-blocked?from=${from}`),
+  /** 자동 합성: 보낸 키워드를 서버가 무작위로 짝지어 한 번에 모두 합성하고 결과를 한 번에 돌려준다 */
+  autoMerge: (ids: number[]) => request<AutoMergeResult>('POST', '/api/me/keywords/auto-merge', { ids }),
   merge: (first: number, second: number) => request<MergeResult>('POST', '/api/me/keywords/merge', { first, second }),
   mergedDetail: (id: number) => request<MergedDetail>('GET', `/api/keywords/merged/${id}`),
   mergedActivity: (id: number, range: ActivityRange) => request<Activity>('GET', `/api/keywords/merged/${id}/activity?range=${range}`),
