@@ -89,14 +89,14 @@ function pushScore(m: ScoreMsg, setPlayer: GameMessageContext['setPlayer']) {
   if (scoreCooling) { scorePending = m; return; }
   apply(m);
   scoreCooling = true;
-  window.setTimeout(() => { scoreCooling = false; if (scorePending) { const last = scorePending; scorePending = null; apply(last); } }, 150);
+  window.setTimeout(() => { scoreCooling = false; if (scorePending) { const last = scorePending; scorePending = null; apply(last); } }, 50);
 }
 
 /**
  * 구슬 결과 묶음 보여 주기: 한꺼번에 여러 개를 먹으면 결과가 잇따라 오는데, 하나씩 카드·떠오르는 글자·목록 갱신을 하면 브라우저가 그만큼 일을 한다.
- * 맨 처음 결과는 바로 처리하고, 그 뒤 ORB_BATCH_MS(0.1초) 안에 온 것은 모아서 끝에 한 번에 처리한다: 결과 카드는 마지막 키워드 하나만, 떠오르는 점수는 합계 하나, 소리는 한 번, 보관함 목록은 한 번에 고친다.
+ * 맨 처음 결과는 바로 처리하고, 그 뒤 ORB_BATCH_MS(0.05초) 안에 온 것은 모아서 끝에 한 번에 처리한다: 결과 카드는 마지막 키워드 하나만, 떠오르는 점수는 합계 하나, 소리는 한 번, 보관함 목록은 한 번에 고친다.
  */
-const ORB_BATCH_MS = 100;
+const ORB_BATCH_MS = 50;
 type OrbMsg = Extract<ServerMessage, { type: 'orbResult' }>;
 let orbBuf: OrbMsg[] = [];
 let orbTimer = 0;
@@ -174,7 +174,7 @@ export function handleGameMessage(m: ServerMessage, c: GameMessageContext) {
     case 'emergency': applyEmergency(m.notice); break;
     case 'titleGranted': showTitleAlert(m.titleId, m.name, m.description); break;
     case 'roster': arena.setRoster(m.players, m.flameAt); setOnline(m.players.filter((p) => !p.bot).length); setBots(m.players.filter((p) => p.bot).length); break;
-    case 'score': // 점수 메시지가 잇따라 와도 0.15초에 한 번만 화면에 반영한다(맨 처음 것은 바로, 그 사이 온 것은 마지막 값만)
+    case 'score': // 점수 메시지가 잇따라 와도 0.05초에 한 번만 화면에 반영한다(맨 처음 것은 바로, 그 사이 온 것은 마지막 값만)
       pushScore(m, setPlayer);
       break;
     case 'leaderboard': setLeaderboard({ top: m.top, me: m.me }); break; // 실시간 랭킹은 소켓으로 받는다(조회하지 않는다)
