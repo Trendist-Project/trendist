@@ -42,6 +42,7 @@ import { KillFeed, type FeedLine } from './KillFeed';
 import { Tutorial, tutorialDone, markTutorialDone, type TutorialApi } from './Tutorial';
 import { playSfx, soundAudible, soundState, subscribeSound, unlockAudio } from '../game/sound';
 import { SoundPanel } from './SoundPanel';
+import { startSoundSync } from '../game/soundSync';
 
 interface Props {
   initialPlayer: PlayerSummary;
@@ -184,7 +185,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   const tutorialApi = useRef<TutorialApi | null>(null);
   const bindTutorial = useCallback((a: TutorialApi) => { tutorialApi.current = a; }, []);
   const [snd, setSnd] = useState(soundState); // 효과음·배경음 켜짐(4.39)
-  useEffect(() => { const sync = () => setSnd(soundState()); sync(); const off = subscribeSound(sync); const un = unlockAudio(); return () => { off(); un(); }; }, []);
+  useEffect(() => { const sync = () => setSnd(soundState()); sync(); const off = subscribeSound(sync); const un = unlockAudio(); const stopSync = startSoundSync(); return () => { off(); un(); stopSync(); }; }, []);
   const [chatView, setChatView] = useState<ChatView>(loadChatView);
   const chatOnRef = useRef(chatView !== 'off');
   chatOnRef.current = chatView !== 'off';

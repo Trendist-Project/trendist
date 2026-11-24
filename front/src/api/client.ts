@@ -6,6 +6,9 @@ import type {
   WheelStatus, WheelSpinResult, Activity, ActivityRange, PlayerCard, PlayerHit, PopularityResult, ScoreHistory, ScoreRange, CommentItem, CommentPage, GuideArticle, GuideCategory, KeywordCard, Me, MyKeyword, Notice, PlayerSummary, 
   AiCommentPage, AiCommentRow, EmergencyNotice, Look, LevelBadge, PixelArtData, ProfileBox, ProfileSave, ShareCardCreated, PlusResult, RankingEntry, SearchResult, TitleBox, TokenResponse, VoteResult, SkillInfo, KeybindingsResponse } from './types';
 
+/** 소리 설정(4.39): 켜짐과 음량(0~100) */
+export interface SoundPrefsResponse { saved: boolean; sfx: boolean; bgm: boolean; master: number; sfxVolume: number; bgmVolume: number }
+
 /** 관리자 스킬 설정(13.3) */
 export interface AdminSkill { code: string; category: string; defaultKey: string; cooldownSeconds: number; requiredLevel: number; enabled: boolean; defaultCooldown: number; defaultRequiredLevel: number; updatedAt: string }
 
@@ -117,6 +120,9 @@ export const api = {
   orbOdds: () => request<{ gainPercent: number; losePercent: number }>('GET', '/api/game-info/orb-odds'),
   levelExp: (levels: number[]) => request<Record<string, number>>('GET', `/api/game-info/level-exp?levels=${levels.join(',')}`),
   skills: () => request<SkillInfo[]>('GET', '/api/skills'),
+  /** 내 소리 설정(4.39, 계정 기준). saved가 false면 저장한 적이 없는 것 */
+  soundSettings: () => request<SoundPrefsResponse>('GET', '/api/me/sound'),
+  saveSoundSettings: (b: Omit<SoundPrefsResponse, 'saved'>) => request<SoundPrefsResponse>('PUT', '/api/me/sound', b),
   /** 아레나 배경 테마·날씨 설정(4.38): 로그인 없이 읽는다. 서버가 정한 모드와 그 나라 위치·시각을 준다 */
   arenaTheme: (country: string = getCountry()) => request<ThemeConfig>('GET', `/api/arena-theme?country=${country}`),
   /** 내 단축키(4.33): 서버가 바꾸지 않은 동작은 기본 키로 채워서 준다 */
