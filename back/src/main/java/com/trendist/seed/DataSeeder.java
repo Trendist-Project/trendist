@@ -110,7 +110,7 @@ public class DataSeeder implements ApplicationRunner {
             }
         }
         // 더 이상 쓰지 않는 설정(콤보 궤도 위성 4.25, 지름 비율 4.2, 갈고리·충격파 반지름 배수 4.33)은 DB에서 지운다. 관리자 화면에 옛 설정으로 계속 남지 않게 한다
-        for (String old : List.of("combo_orbit_at", "orbit_interval_seconds", "orbit_max", "max_diameter_ratio", "leaderboard_size", "hook_range_ratio", "shockwave_range_ratio")) {
+        for (String old : List.of("combo_orbit_at", "orbit_interval_seconds", "orbit_max", "max_diameter_ratio", "leaderboard_size", "hook_range_ratio", "shockwave_range_ratio", "arena_theme_mode", "arena_theme_fixed")) {
             settings.findByName(old).ifPresent(settings::delete);
         }
         // 최소·최대 크기는 지름이 아니라 반지름으로 둔다(4.2): 옛 지름 설정은 값을 절반으로 옮기며 이름을 바꾼다(아래 설정 만들기에서 옮긴 값을 쓴다)

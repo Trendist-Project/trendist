@@ -373,12 +373,14 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
                 if (winnerId == null) {
                     keywordService.loseRandom(loserId).ifPresent(lost -> room.submit(r -> {
                         r.botTakes(winner, lost.keywordId()); // 이긴 봇이 사람이 잃은 그 키워드를 메모리에 가진다(4.21)
+                        r.feed("steal", winner, loser);
                         Room.Member m = r.byPlayer(loserId);
                         if (m != null) sendText(m, LossMessages.lost(cause, winnerName, 1, lost.score(), lost.text()));
                     }));
                     return;
                 }
                 keywordService.stealRandom(loserId, winnerId).ifPresent(st -> room.submit(r -> {
+                    r.feed("steal", winner, loser);
                     Room.Member m = r.byPlayer(loserId);
                     if (m != null) sendText(m, LossMessages.lost(cause, winnerName, 1, st.score(), st.text()));
                     Room.Member w = r.byPlayer(winnerId);

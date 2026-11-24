@@ -21,6 +21,11 @@ final class RoomMessages {
     /** 내가 상대(target)를 쓰러뜨렸다(4.31) */
     static Map<String, Object> kill(String target) { return Map.of("type", "kill", "target", target); }
     /** 레벨업 빛기둥(4.30) */
+    /** 킬 피드(방 전체): kind는 steal(키워드를 빼앗음)·kill(죽임). 키워드 이름은 싣지 않는다(3.3 비노출) */
+    static Map<String, Object> feed(String kind, String by, int byE, String target, int tE) {
+        return Map.of("type", "feed", "kind", kind, "by", by, "byE", byE, "target", target, "tE", tE);
+    }
+
     static Map<String, Object> levelFx(int e, int level) { return Map.of("type", "levelFx", "e", e, "level", level); }
 
     /** 무적 보호막과 카운트다운(4.3): 원 e에 ms 동안 */

@@ -131,6 +131,15 @@ public final class SettingKeys {
     public static final String HP_KILL_HEAL_PERCENT = "hp_kill_heal_percent";
     public static final String DEATH_LOSE_PERCENT = "death_lose_percent";
     public static final String FLAME_HIT_LOSE_PERCENT = "flame_hit_lose_percent";
+    public static final String ARENA_BG = "arena_bg";
+    public static final String ARENA_LIGHT_MODE = "arena_light_mode";
+    public static final String ARENA_LIGHT_FIXED = "arena_light_fixed";
+    public static final String ARENA_WEATHER_MODE = "arena_weather_mode";
+    public static final String ARENA_WEATHER_FIXED = "arena_weather_fixed";
+    public static final String ARENA_KR_LAT = "arena_kr_lat";
+    public static final String ARENA_KR_LON = "arena_kr_lon";
+    public static final String ARENA_GLOBAL_LAT = "arena_global_lat";
+    public static final String ARENA_GLOBAL_LON = "arena_global_lon";
 
     public static final List<Def> DEFAULTS = List.of(
             // 트렌드 값(4.8): 가진 비율 s = 가진 사람 / max(활동 인원, 최소 인원). s가 최고점 비율이면 최대 기준값
@@ -261,6 +270,15 @@ public final class SettingKeys {
             new Def(FLAME_HIT_LOSE_PERCENT, "50", 0, 100, "불꽃인 사람에게 부딪혀 잃는 키워드 비율(보유 키워드 수 × 이 %, 내림, 최소 1개. 100이면 예전처럼 모두 잃는다)"),
             new Def(COMBO_MAX_SECONDS, "300", 0, 86400, "콤보 유지시간: 마지막으로 콤보가 오른 때부터 이 시간이 지나면 연속 횟수와 불꽃이 사라진다. 콤보가 추가될 때마다 다시 시작한다(기본 300초 = 5분, 0이면 제한 없음)"),
             new Def(COMBO_BOT_COUNTS, "1", 0, 1, "봇을 이겨 키워드를 얻은 것도 콤보에 넣을지(1이면 넣음, 0이면 사람에게서 빼앗은 것만)"),
+            new Def(ARENA_BG, "0", 0, 40, "아레나 배경(풍경): 0 = 기본 아레나(원래 모습) / 자연 풍경 1 = 풀밭, 2 = 벚꽃, 3 = 가을, 4 = 설원, 5 = 바다, 6 = 수영장 / 픽셀 풍경 11 = 초원, 12 = 숲, 13 = 사막, 14 = 설원, 15 = 던전 / 전투장 21 = 콜로세움, 22 = 돌 전투장, 23 = 용암 전투장 / 이벤트 31 = 네온, 32 = 우주. 목록에 없는 번호는 기본 아레나로 그린다"),
+            new Def(ARENA_LIGHT_MODE, "0", 0, 2, "아레나 조명(시간대): 0 = 끔(조명 없음), 1 = 현실 시간 자동(그 나라 위치의 현실 시각으로 해·달의 위치와 색조·그림자·밝기가 바뀐다), 2 = 고정(arena_light_fixed). 어떤 배경 위에도 적용된다"),
+            new Def(ARENA_LIGHT_FIXED, "1", 1, 4, "고정 조명(조명이 2일 때): 1 = 낮, 2 = 노을, 3 = 밤, 4 = 새벽"),
+            new Def(ARENA_WEATHER_MODE, "0", 0, 2, "아레나 날씨: 0 = 끔, 1 = 실제 날씨(나라 기준 위치의 지금 날씨, 15분마다 갱신), 2 = 고정 날씨(arena_weather_fixed)"),
+            new Def(ARENA_WEATHER_FIXED, "0", 0, 5, "고정 날씨(날씨 방식이 2일 때): 0 = 맑음, 1 = 구름, 2 = 비, 3 = 눈, 4 = 안개, 5 = 뇌우"),
+            new Def(ARENA_KR_LAT, "37.5665", -90, 90, "한국 서버의 시각·날씨 기준 위도(기본 서울)"),
+            new Def(ARENA_KR_LON, "126.978", -180, 180, "한국 서버의 시각·날씨 기준 경도(기본 서울)"),
+            new Def(ARENA_GLOBAL_LAT, "51.5", -90, 90, "글로벌 서버의 시각·날씨 기준 위도(기본 런던)"),
+            new Def(ARENA_GLOBAL_LON, "0.0", -180, 180, "글로벌 서버의 시각·날씨 기준 경도(기본 런던)"),
             new Def(EXTERNAL_HOLD_HOURS, "168", 1, 2160, "목록형 외부 소스(google)에 오른 키워드의 활성 유지 시간. 목록에 보일 때마다 지금부터 다시 센다"));
 
     private static final java.util.Set<String> KNOWN = new java.util.HashSet<>();
@@ -276,7 +294,7 @@ public final class SettingKeys {
 
     /** 관리자 설정 화면의 그룹 순서. 새 설정을 만들면 아래 GROUP_OF에서 그룹을 정한다(없으면 "기타"). */
     public static final List<String> GROUP_ORDER = List.of("트렌드·키워드", "성장·경험치·칭호", "맵·크기", "이동·충돌", "보호·접속",
-            "세이프존", "? 구슬", "NPC 봇", "스킬", "일일 제한·돌림판", "콤보·불꽃", "체력(HP)", "꾸미기·계정", "AI 설명", "기타");
+            "세이프존", "? 구슬", "NPC 봇", "스킬", "일일 제한·돌림판", "콤보·불꽃", "체력(HP)", "아레나 배경·연출", "꾸미기·계정", "AI 설명", "기타");
 
     private static final java.util.Map<String, String> GROUP_OF = new java.util.HashMap<>();
     private static final java.util.Map<String, List<String>> NAMES_OF_GROUP = new java.util.HashMap<>();
@@ -317,6 +335,8 @@ public final class SettingKeys {
         group("콤보·불꽃", COMBO_FLAME_AT, COMBO_MAX_SECONDS, COMBO_BOT_COUNTS);
         group("체력(HP)", HP_ENABLED, HP_MAX, HP_HIT_SECONDS, HP_FLAME_MULTIPLIER, HP_FLAME_COUNTER,
                 DEATH_LOSE_PERCENT, FLAME_HIT_LOSE_PERCENT, HP_SAFE_REGEN_PERCENT, HP_KILL_HEAL_PERCENT, HP_PUBLIC);
+        group("아레나 배경·연출", ARENA_BG, ARENA_LIGHT_MODE, ARENA_LIGHT_FIXED, ARENA_WEATHER_MODE, ARENA_WEATHER_FIXED,
+                ARENA_KR_LAT, ARENA_KR_LON, ARENA_GLOBAL_LAT, ARENA_GLOBAL_LON);
         group("꾸미기·계정", CUSTOMIZE_UNLOCK_LEVEL, ART_CHANGE_MINUTES, NICKNAME_CHANGE_MINUTES);
         group("AI 설명", AI_COMMENT_ENABLED, AI_COMMENT_GROUNDING, AI_COMMENT_BATCH_SIZE, AI_COMMENT_DAILY_MAX);
     }
@@ -365,6 +385,7 @@ public final class SettingKeys {
         unit("EXP", EXP_PER_PLUS, ATTACK_EXP, KILL_EXP);
         unit("레벨", CUSTOMIZE_UNLOCK_LEVEL);
         unit("콤보", COMBO_FLAME_AT);
+        unit("°", ARENA_KR_LAT, ARENA_KR_LON, ARENA_GLOBAL_LAT, ARENA_GLOBAL_LON);
         unit("회", AI_COMMENT_DAILY_MAX, POISON_TICKS);
     }
 

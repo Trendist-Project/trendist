@@ -568,6 +568,7 @@ public class Room {
         endBuffs(loser);
         loser.dead = true;
         members.remove(loser.entityNo);
+        broadcast(RoomMessages.feed("kill", killer.nickname, killer.entityNo, loser.nickname, loser.entityNo));
         if (!killer.bot) outbox.requestKill(this, killer); // 죽인 횟수(4.31): 죽은 쪽이 사람이든 봇이든 센다
         if (loser.bot) {
             // 봇도 사람처럼 죽는다(4.31): 방에서 빠지고, 다음 봇 채우기(1초마다)에서 같은 봇이 남은 키워드·EXP를 가지고 가운데 세이프존에서 다시 나온다(리스폰)
@@ -1177,6 +1178,11 @@ public class Room {
 
     /** 방의 모두(관전 포함)에게 글 메시지를 보낸다. 방 스레드에서 부른다(긴급 안내처럼 서버 전체 알림, 4.29). */
     public void announce(Map<String, Object> msg) { broadcast(msg); }
+
+    /** 킬 피드(방 전체): 이긴 쪽이 진 쪽의 키워드를 빼앗았거나(steal) 죽였다(kill). 방 스레드에서 부른다 */
+    public void feed(String kind, Member by, Member target) {
+        broadcast(RoomMessages.feed(kind, by.nickname, by.entityNo, target.nickname, target.entityNo));
+    }
 
     void broadcast(Map<String, Object> msg) {
         for (Member m : members.values()) outbox.sendText(m, msg);

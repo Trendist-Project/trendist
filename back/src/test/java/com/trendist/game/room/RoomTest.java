@@ -159,6 +159,9 @@ class RoomTest {
         assertThat(out.loses).isEmpty(); // 잃을 키워드가 없으니 키워드 잃기 요청은 없다
         assertThat(out.texts).anyMatch(m -> "died".equals(m.get("type")) && "b".equals(m.get("by")));
         assertThat(out.texts).anyMatch(m -> "kill".equals(m.get("type")) && "a".equals(m.get("target")));
+        // 킬 피드(방 전체): 누가 누구를 죽였는지만 싣고 키워드 이름은 싣지 않는다(3.3)
+        assertThat(out.texts).anyMatch(m -> "feed".equals(m.get("type")) && "kill".equals(m.get("kind")) && "b".equals(m.get("by")) && "a".equals(m.get("target"))
+                && !m.containsKey("keyword"));
         assertThat(out.kills).containsExactly(2L); // 죽인 횟수 기록 요청(4.31)
         assertThat(out.defeats).containsExactly(1L); // 진 사람의 패배 횟수 기록 요청(4.31)
     }
