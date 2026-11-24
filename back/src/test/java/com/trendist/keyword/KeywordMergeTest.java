@@ -39,6 +39,8 @@ class KeywordMergeTest {
     @Autowired TrendFormula formula;
     @Autowired SettingService settings;
     @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
+    @Autowired com.trendist.keyword.holding.Holdings holdings;
+    @Autowired org.springframework.transaction.support.TransactionTemplate txTemplate;
 
     @BeforeEach
     void noBonusByDefault() {
@@ -392,10 +394,14 @@ class KeywordMergeTest {
         var r = merge(me, idOf("만료합가"), idOf("만료합나"));
         assertThat(keywords.findById(idOf("만료합가")).orElseThrow().getHolderCount()).isEqualTo(1);
         // 만료 시각을 과거로 돌리고 만료 처리: 구성 원본의 가진 사람 수와 보유 키워드 수가 줄어든다
-        jdbc.update("update player_keywords set expires_at = ? where player_id = ? and keyword_id = ?",
-                java.sql.Timestamp.from(Instant.now().minusSeconds(60)), me.playerId(), r.keyword().keywordId());
-        Long rowId = jdbc.queryForObject("select id from player_keywords where player_id = ? and keyword_id = ?", Long.class,
-                me.playerId(), r.keyword().keywordId());
+        // 보관함이 DB(JPA)든 메모리든 같게 동작하도록 Holdings 창구로 만료 시각을 과거로 돌린다
+        Instant past = Instant.now().minusSeconds(60);
+        Long rowId = txTemplate.execute(st -> {
+            var row = holdings.findByPlayerIdAndKeywordId(me.playerId(), r.keyword().keywordId()).orElseThrow();
+            row.renew(past, past);
+            holdings.flush();
+            return row.getId();
+        });
         assertThat(keywordService.expireOne(rowId)).isTrue();
         assertThat(keywords.findById(idOf("만료합가")).orElseThrow().getHolderCount()).isZero();
         assertThat(keywords.findById(idOf("만료합나")).orElseThrow().getHolderCount()).isZero();

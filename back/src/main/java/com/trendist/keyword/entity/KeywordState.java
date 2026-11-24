@@ -11,6 +11,8 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @Entity
 @Table(name = "keyword_states", uniqueConstraints = @UniqueConstraint(name = "uk_keyword_states_name", columnNames = "name"))
+@jakarta.persistence.Cacheable
+@org.hibernate.annotations.Cache(usage = org.hibernate.annotations.CacheConcurrencyStrategy.READ_WRITE) // 엔티티 2차 캐시(application.yml, 켜져 있을 때만)
 public class KeywordState extends BaseTimeEntity {
     @Column(nullable = false, length = 50) private String name;
 

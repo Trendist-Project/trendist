@@ -21,6 +21,20 @@ spring:
       hibernate:
         jdbc:
           time_zone: UTC
+        # 엔티티 2차 캐시(키워드·키워드 상태·데이터 소스·레벨·나라): 읽기 위주 데이터를 메모리에서 읽어 번호로 읽는 조회(select ... where id=?)를 없앤다.
+        # 켜는 법: 환경변수 TRENDIST_ENTITY_CACHE=true (기본 꺼짐). 바뀌면 Hibernate가 해당 항목을 무효화한다
+        cache:
+          use_second_level_cache: ${TRENDIST_ENTITY_CACHE:false}
+          region:
+            factory_class: jcache
+        javax:
+          cache:
+            provider: com.github.benmanes.caffeine.jcache.spi.CaffeineCachingProvider
+            missing_cache_strategy: create
+      jakarta:
+        persistence:
+          sharedCache:
+            mode: ENABLE_SELECTIVE
   # DB 마이그레이션(Flyway). 기본은 꺼 두고(자동 테스트는 H2에 JPA가 스키마를 만든다), dev·prod 프로필이 켠다.
   flyway:
     enabled: false

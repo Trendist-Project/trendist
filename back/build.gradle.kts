@@ -26,6 +26,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-flyway") // DB 마이그레이션(src/main/resources/db/migration). 테스트(H2)에서는 꺼 둔다
     implementation("org.flywaydb:flyway-mysql")                          // MySQL 8·MariaDB 지원
     implementation("com.github.ben-manes.caffeine:caffeine")
+    implementation("org.hibernate.orm:hibernate-jcache")                 // 엔티티 2차 캐시(키워드·상태·레벨 같은 읽기 위주 데이터)
+    implementation("com.github.ben-manes.caffeine:jcache:3.2.4")          // 그 캐시를 Caffeine으로 구현(JCache)
     implementation("org.springframework.security:spring-security-oauth2-jose") // 구글 ID 토큰(JWT) 서명 검증(9.3)
 
     compileOnly("org.projectlombok:lombok")

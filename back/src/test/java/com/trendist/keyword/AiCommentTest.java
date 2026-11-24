@@ -31,7 +31,8 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 /** 키워드 AI 한 줄 설명(4.12): 처음 🔥가 될 때 만들기, 카드에 보이기, 갱신 요청, 관리자 재요청·수정. 제미나이는 가짜로 바꿔 끼운다. */
-@SpringBootTest
+// 한 시험이 끝나면 컨텍스트를 닫는데, 2차 캐시의 캐시 관리자는 JVM 안에서 공유돼 다른 컨텍스트의 캐시까지 닫히므로 이 컨텍스트는 2차 캐시를 쓰지 않는다
+@SpringBootTest(properties = "spring.jpa.properties.hibernate.cache.use_second_level_cache=false")
 @ActiveProfiles("test")
 @AutoConfigureMockMvc
 class AiCommentTest {

@@ -9,7 +9,6 @@ import com.trendist.keyword.entity.KeywordLogDaily;
 import com.trendist.keyword.repository.KeywordLog24hRepository;
 import com.trendist.keyword.repository.KeywordLogDailyRepository;
 import com.trendist.keyword.repository.KeywordRepository;
-import com.trendist.keyword.repository.PlayerKeywordRepository;
 import com.trendist.keyword.support.SearchCounter;
 import com.trendist.player.entity.Player;
 import com.trendist.player.service.PlayerService;
@@ -32,7 +31,7 @@ public class KeywordActivityServiceImpl implements KeywordActivityService {
     private final com.trendist.keyword.repository.KeywordMergePartRepository mergeParts;
     private final KeywordLog24hRepository hourly;
     private final KeywordLogDailyRepository daily;
-    private final PlayerKeywordRepository playerKeywords;
+    private final com.trendist.keyword.holding.Holdings holdings;
     private final PlayerService playerService;
     private final SearchCounter searchCounter;
     private final Clock clock;
@@ -83,7 +82,7 @@ public class KeywordActivityServiceImpl implements KeywordActivityService {
         if (prev.isPresent()) return new Base(prev.get().getAddCount(), prev.get().getHolderCount());
         // 직전 기록이 없다(새 키워드거나 기록을 시작하기 전부터 있던 키워드). 그 시간 뒤에 +되어 남아 있는 행만 이번 증분으로 본다.
         // 옛 누적값이 한 시간에 몰려 그래프가 튀지 않게 하려는 것이다
-        long recent = playerKeywords.countPlusedSince(k.getId(), since);
+        long recent = holdings.countPlusedSince(k.getId(), since);
         return new Base(Math.max(0, k.getAddCount() - recent), Math.max(0, k.getHolderCount() - recent));
     }
 

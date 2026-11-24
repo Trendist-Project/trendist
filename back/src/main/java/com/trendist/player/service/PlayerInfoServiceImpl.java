@@ -5,7 +5,6 @@ import com.trendist.common.exception.ApiException;
 import com.trendist.common.support.RateLimiter;
 import com.trendist.game.room.Room;
 import com.trendist.game.service.RoomManager;
-import com.trendist.keyword.repository.PlayerKeywordRepository;
 import com.trendist.player.dto.PlayerDtos;
 import com.trendist.player.entity.Player;
 import com.trendist.player.repository.PlayerRepository;
@@ -26,7 +25,7 @@ public class PlayerInfoServiceImpl implements PlayerInfoService {
 
     private final PlayerService playerService;
     private final PlayerRepository players;
-    private final PlayerKeywordRepository playerKeywords;
+    private final com.trendist.keyword.holding.Holdings holdings;
     private final com.trendist.keyword.repository.KeywordRepository keywordRepo;
     private final com.trendist.keyword.repository.KeywordMergePartRepository mergeParts;
     private final TitleRepository titles;
@@ -73,7 +72,7 @@ public class PlayerInfoServiceImpl implements PlayerInfoService {
     }
 
     private PlayerDtos.PlayerCard build(long userId, Player p, int entityNo, String nickname, long level, long score) {
-        List<PlayerDtos.KeywordTag> top = playerKeywords.findTopByPlayer(p.getId(), Instant.now(clock),
+        List<PlayerDtos.KeywordTag> top = holdings.findTopByPlayer(p.getId(), Instant.now(clock),
                         codes.keywordStateId(CodeTables.KW_BANNED), PageRequest.of(0, TOP_KEYWORDS)).stream()
                 .map(pk -> new PlayerDtos.KeywordTag(pk.getKeyword().getId(), displayText(pk.getKeyword()),
                         pk.getKeyword().getKeywordState().getName(), pk.getKeyword().isMerged(), pk.getKeyword().getStarCount()))

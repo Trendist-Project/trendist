@@ -219,6 +219,35 @@ class ApiFlowTest {
     }
 
     @Test
+    void losingManyKeywordsAtOnceKeepsHolderCountsHoldCountAndScoreConsistent() throws Exception {
+        // 한 번에 많이 잃는 경로(불꽃·사망)를 묶어서 처리해도: 잃은 키워드는 가진 사람 수가 줄고, 남은 키워드는 그대로이며, 보유 수와 점수가 남은 보관함과 맞는다
+        String t = player("대량잃기");
+        long pid = playerIdOf(t);
+        List<String> titles = new java.util.ArrayList<>();
+        for (int i = 0; i < 2; i++) titles.add("대량잃기키워드" + i);
+        keywordService.applyExternalTitles("KR", DataSource.GOOGLE, titles);
+        keywordService.openPrizeOrbs(pid, 8);
+        long userId = Long.parseLong(body(mvc.perform(get("/api/me").header("Authorization", "Bearer " + t)).andReturn(), "$.userId"));
+        var before = keywordService.myKeywords(userId);
+        assertThat(before).hasSize(8);
+        java.util.Map<Long, Long> holders = new java.util.HashMap<>(); // 다른 시험이 만든 키워드도 구슬로 나오므로 가진 사람 수는 값이 아니라 변화로 본다
+        for (var k : before) holders.put(k.keywordId(), keywords.findById(k.keywordId()).orElseThrow().getHolderCount());
+        long scoreBefore = ((Number) JsonPath.read(mvc.perform(get("/api/me").header("Authorization", "Bearer " + t)).andReturn().getResponse().getContentAsString(), "$.player.currentScore")).longValue();
+        var lost = keywordService.loseFraction(pid, 50).orElseThrow();
+        assertThat(lost.count()).isEqualTo(4);
+        var after = keywordService.myKeywords(userId);
+        assertThat(after).hasSize(4);
+        java.util.Set<Long> kept = after.stream().map(com.trendist.keyword.dto.KeywordDtos.MyKeyword::keywordId).collect(java.util.stream.Collectors.toSet());
+        for (var k : before) assertThat(keywords.findById(k.keywordId()).orElseThrow().getHolderCount()).isEqualTo(holders.get(k.keywordId()) - (kept.contains(k.keywordId()) ? 0 : 1));
+        mvc.perform(get("/api/me").header("Authorization", "Bearer " + t)).andExpect(jsonPath("$.player.holdCount").value(4));
+        long scoreAfter = ((Number) JsonPath.read(mvc.perform(get("/api/me").header("Authorization", "Bearer " + t)).andReturn().getResponse().getContentAsString(), "$.player.currentScore")).longValue();
+        assertThat(scoreBefore - scoreAfter).isEqualTo(lost.score()); // 줄어든 점수 = 잃은 활성 키워드의 점수 합
+        keywordService.loseAll(pid); // 모두 잃기도 같은 방식으로 끝까지 맞는다
+        assertThat(keywordService.myKeywords(userId)).isEmpty();
+        for (var k : before) assertThat(keywords.findById(k.keywordId()).orElseThrow().getHolderCount()).isEqualTo(holders.get(k.keywordId()) - 1);
+    }
+
+    @Test
     void prizeOrbAlwaysGainsAndWipeLosesEverything() throws Exception {
         // ! 구슬은 꽝·잃기 없이 항상 얻고(가능하면 안 가진 키워드), 불꽃에게 지면 가진 키워드를 모두 잃는다(4.20, 4.25)
         String t = player("느낌표러");

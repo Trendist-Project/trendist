@@ -4,6 +4,7 @@ import com.trendist.common.entity.BaseTimeEntity;
 import com.trendist.country.entity.Country;
 import jakarta.persistence.*;
 import java.time.Instant;
+import com.trendist.keyword.memory.KeywordCounters;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -14,6 +15,8 @@ import lombok.NoArgsConstructor;
 @Table(name = "keywords",
         uniqueConstraints = @UniqueConstraint(name = "uk_keywords_country_normalized", columnNames = {"country_id", "normalized"}),
         indexes = @Index(name = "idx_keywords_state", columnList = "country_id, keyword_state_id, trend_value"))
+@jakarta.persistence.Cacheable
+@org.hibernate.annotations.Cache(usage = org.hibernate.annotations.CacheConcurrencyStrategy.READ_WRITE) // 엔티티 2차 캐시(application.yml, 켜져 있을 때만)
 public class Keyword extends BaseTimeEntity {
     @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "country_id", nullable = false) private Country country;
     @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "data_source_id", nullable = false) private DataSource dataSource;
@@ -58,10 +61,17 @@ public class Keyword extends BaseTimeEntity {
     public void setDataSource(DataSource dataSource) { this.dataSource = dataSource; }
 
     public void attachAiComment(KeywordAiComment row) { this.aiComment = row; }
-    public void setTrendValue(long trendValue) { this.trendValue = trendValue; }
-    public void incAdd() { addCount++; }
-    public void incHolder() { holderCount++; }
-    public void decHolder() { holderCount = Math.max(0, holderCount - 1); }
+    // 가진 사람 수·추가 횟수·점수: 메모리 카운터가 켜져 있고(KeywordCounters.INSTANCE) 이미 저장된 키워드면 메모리가 원천이다(DB는 1분마다 저장).
+    // 꺼져 있으면 지금까지처럼 필드를 쓴다. 메모리를 쓸 때는 필드를 고치지 않아 이 값만 바뀐 트랜잭션은 keywords UPDATE를 만들지 않는다
+    public long getHolderCount() { var s = KeywordCounters.INSTANCE; return s != null && id != null ? s.holder(id, holderCount, addCount, trendValue) : holderCount; }
+    public long getAddCount() { var s = KeywordCounters.INSTANCE; return s != null && id != null ? s.add(id, holderCount, addCount, trendValue) : addCount; }
+    public long getTrendValue() { var s = KeywordCounters.INSTANCE; return s != null && id != null ? s.trend(id, holderCount, addCount, trendValue) : trendValue; }
+    public void setTrendValue(long trendValue) { var s = KeywordCounters.INSTANCE; if (s != null && id != null) s.setTrend(id, trendValue, holderCount, addCount, this.trendValue); else this.trendValue = trendValue; }
+    public void incAdd() { var s = KeywordCounters.INSTANCE; if (s != null && id != null) s.addAdd(id, 1, holderCount, addCount, trendValue); else addCount++; }
+    public void incHolder() { var s = KeywordCounters.INSTANCE; if (s != null && id != null) s.addHolder(id, 1, holderCount, addCount, trendValue); else holderCount++; }
+    /** 가진 사람 수를 값으로 맞춘다(시작할 때 보관함에서 다시 센 값으로 바로잡는 데 쓴다) */
+    public void setHolderCount(long v) { long cur = getHolderCount(); if (v > cur) { for (long i = cur; i < v; i++) incHolder(); } else { for (long i = v; i < cur; i++) decHolder(); } }
+    public void decHolder() { var s = KeywordCounters.INSTANCE; if (s != null && id != null) s.addHolder(id, -1, holderCount, addCount, trendValue); else holderCount = Math.max(0, holderCount - 1); }
     public void addSearch(long n) { searchCount += n; }
 
     public void activate(KeywordState active, Instant now) {

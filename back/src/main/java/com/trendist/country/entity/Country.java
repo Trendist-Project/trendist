@@ -10,6 +10,8 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @Entity
 @Table(name = "countries", uniqueConstraints = @UniqueConstraint(name = "uk_countries_code", columnNames = "code"))
+@jakarta.persistence.Cacheable
+@org.hibernate.annotations.Cache(usage = org.hibernate.annotations.CacheConcurrencyStrategy.READ_WRITE) // 엔티티 2차 캐시(application.yml, 켜져 있을 때만)
 public class Country extends BaseTimeEntity {
     @Column(nullable = false, length = 10) private String code;
     @Column(nullable = false, length = 100) private String name;

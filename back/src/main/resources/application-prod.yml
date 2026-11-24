@@ -4,8 +4,13 @@ server:
   port: ${PROD_SERVER_PORT}
   # nginx가 넣는 X-Forwarded-For로 실제 접속 IP를 읽는다(자랑하기 카드 조회 수의 방문자 구분, 4.24)
   forward-headers-strategy: native
+  # docker stop(SIGTERM)을 받으면 새 요청은 막고 진행 중인 요청을 끝낸 뒤 종료한다. 이 사이에 메모리의 보관함·카운터를 DB에 마지막으로 저장한다(@PreDestroy)
+  shutdown: graceful
 
 spring:
+  lifecycle:
+    # 종료 단계마다 기다리는 최대 시간. 서버 compose의 stop_grace_period(docker stop 대기)보다 짧게 둔다
+    timeout-per-shutdown-phase: 20s
   datasource:
     url: ${PROD_MYSQL_URL}
     username: ${MYSQL_USERNAME}

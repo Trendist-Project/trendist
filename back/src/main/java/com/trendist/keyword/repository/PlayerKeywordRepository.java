@@ -13,6 +13,10 @@ import org.springframework.data.repository.query.Param;
 public interface PlayerKeywordRepository extends JpaRepository<PlayerKeyword, Long> {
     Optional<PlayerKeyword> findByPlayerIdAndKeywordId(Long playerId, Long keywordId);
 
+    /** 시작할 때 메모리로 올리는 모든 행 [행 번호, 플레이어 번호, 키워드 번호, 얻은 시각, 만료 시각] */
+    @Query("select pk.id, pk.player.id, pk.keyword.id, pk.createdAt, pk.expiresAt from PlayerKeyword pk")
+    List<Object[]> findAllRaw();
+
     /** 이 플레이어가 가진(만료된 행 포함) 보관함 행 중 주어진 키워드의 것(구슬 여러 개를 한꺼번에 처리할 때 한 번에 읽는다) */
     List<PlayerKeyword> findByPlayerIdAndKeywordIdIn(Long playerId, java.util.Collection<Long> keywordIds);
 

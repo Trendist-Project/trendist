@@ -14,6 +14,10 @@ import org.springframework.data.repository.query.Param;
 public interface KeywordRepository extends JpaRepository<Keyword, Long> {
     Optional<Keyword> findByCountryIdAndNormalized(Long countryId, String normalized);
 
+    /** 시작할 때 가진 사람 수를 보관함에서 다시 센 값과 맞춰 볼 키워드: DB에 가진 사람이 있다고 적힌 것, 또는 보관함에 든 것 */
+    @Query("select k from Keyword k where k.holderCount > 0 or k.id in :ids")
+    List<Keyword> findForHolderReconcile(@Param("ids") java.util.Collection<Long> ids);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select k from Keyword k where k.id = :id")
     Optional<Keyword> findByIdForUpdate(@Param("id") Long id);

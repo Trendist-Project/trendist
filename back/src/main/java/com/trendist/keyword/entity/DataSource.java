@@ -12,6 +12,8 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @Entity
 @Table(name = "data_sources", uniqueConstraints = @UniqueConstraint(name = "uk_data_sources_name", columnNames = "name"))
+@jakarta.persistence.Cacheable
+@org.hibernate.annotations.Cache(usage = org.hibernate.annotations.CacheConcurrencyStrategy.READ_WRITE) // 엔티티 2차 캐시(application.yml, 켜져 있을 때만)
 public class DataSource extends BaseTimeEntity {
     public static final String INTERNAL = "internal";
     public static final String GOOGLE = "google"; // 구글 트렌드 실시간 인기 RSS(10.1)

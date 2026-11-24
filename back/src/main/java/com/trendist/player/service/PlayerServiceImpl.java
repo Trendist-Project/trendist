@@ -6,7 +6,6 @@ import com.trendist.country.entity.Country;
 import com.trendist.country.service.CountryService;
 import com.trendist.game.event.GameEvents;
 import com.trendist.game.room.Room;
-import com.trendist.keyword.repository.PlayerKeywordRepository;
 import com.trendist.keyword.support.TrendFormula;
 import com.trendist.player.dto.PlayerDtos;
 import com.trendist.player.entity.Player;
@@ -34,7 +33,7 @@ public class PlayerServiceImpl implements PlayerService {
     private final PlayerRepository players;
     private final UserRepository users;
     private final CountryService countries;
-    private final PlayerKeywordRepository playerKeywords;
+    private final com.trendist.keyword.holding.Holdings holdings;
     private final LevelService levels;
     private final TrendFormula formula;
     private final CodeTables codes;
@@ -204,7 +203,7 @@ public class PlayerServiceImpl implements PlayerService {
     public long recompute(Player p) {
         Instant now = Instant.now(clock);
         // 키워드 점수가 모두 정수라 합도 정수다(4.8)
-        long sum = playerKeywords.sumActiveTrendValue(p.getId(), now, codes.keywordStateId(CodeTables.KW_ACTIVE));
+        long sum = holdings.sumActiveTrendValue(p.getId(), now, codes.keywordStateId(CodeTables.KW_ACTIVE));
         var progress = levels.advance(p.getLevel(), p.getExp()); // 레벨이 오르면 필요한 EXP를 빼고 남은 EXP를 이어 가진다
         p.setLevel(progress.row());
         p.setExp(progress.exp());
@@ -220,7 +219,7 @@ public class PlayerServiceImpl implements PlayerService {
     @Transactional
     public void recomputeLocked(long playerId, boolean fixHoldCount) {
         players.findByIdForUpdate(playerId).ifPresent(p -> {
-            if (fixHoldCount) p.setHoldCount((int) playerKeywords.countUnexpired(p.getId(), Instant.now(clock)));
+            if (fixHoldCount) p.setHoldCount((int) holdings.countUnexpired(p.getId(), Instant.now(clock)));
             recompute(p);
         });
     }

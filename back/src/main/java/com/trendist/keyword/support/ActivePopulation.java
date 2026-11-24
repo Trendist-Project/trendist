@@ -1,7 +1,6 @@
 package com.trendist.keyword.support;
 
 import com.trendist.common.code.CodeTables;
-import com.trendist.keyword.repository.PlayerKeywordRepository;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.HashMap;
@@ -17,7 +16,7 @@ import org.springframework.stereotype.Component;
 @Component
 @RequiredArgsConstructor
 public class ActivePopulation {
-    private final PlayerKeywordRepository playerKeywords;
+    private final com.trendist.keyword.holding.Holdings holdings;
     private final CodeTables codes;
     private final Clock clock;
     private final Map<Long, Long> byCountry = new ConcurrentHashMap<>();
@@ -31,7 +30,7 @@ public class ActivePopulation {
     /** 다시 센다. 값이 바뀐 나라가 있으면 true. */
     public synchronized boolean refresh() {
         Map<Long, Long> next = new HashMap<>();
-        for (Object[] row : playerKeywords.countHoldingPlayersByCountry(Instant.now(clock), codes.userState(CodeTables.USER_WITHDRAWN).getId())) {
+        for (Object[] row : holdings.countHoldingPlayersByCountry(Instant.now(clock), codes.userState(CodeTables.USER_WITHDRAWN).getId())) {
             next.put((Long) row[0], (Long) row[1]);
         }
         boolean changed = !next.equals(byCountry);

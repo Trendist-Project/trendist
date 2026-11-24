@@ -2,7 +2,6 @@ package com.trendist.keyword.job;
 
 import com.trendist.keyword.entity.DataSource;
 import com.trendist.keyword.repository.KeywordRepository;
-import com.trendist.keyword.repository.PlayerKeywordRepository;
 import com.trendist.keyword.service.KeywordActivityService;
 import com.trendist.keyword.service.KeywordService;
 import com.trendist.keyword.support.SearchCounter;
@@ -34,7 +33,7 @@ public class KeywordJobs {
     private final KeywordActivityService activity;
     private final PlayerService playerService;
     private final ScoreHistoryService scoreHistory;
-    private final PlayerKeywordRepository playerKeywords;
+    private final com.trendist.keyword.holding.Holdings holdings;
     private final PlayerRepository players;
     private final KeywordRepository keywords;
     private final SearchCounter searchCounter;
@@ -55,7 +54,7 @@ public class KeywordJobs {
         int expired = 0;
         List<Long> ids;
         do {
-            ids = playerKeywords.findExpiredIds(Instant.now(clock), PageRequest.of(0, 500));
+            ids = holdings.findExpiredIds(Instant.now(clock), PageRequest.of(0, 500));
             for (Long id : ids) {
                 try { if (keywordService.expireOne(id)) expired++; } catch (RuntimeException e) { log.warn("expire {} failed", id, e); }
             }

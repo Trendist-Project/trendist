@@ -13,6 +13,8 @@ import org.hibernate.annotations.BatchSize;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @Entity
 @Table(name = "levels", uniqueConstraints = @UniqueConstraint(name = "uk_levels_level", columnNames = "level"))
+@jakarta.persistence.Cacheable
+@org.hibernate.annotations.Cache(usage = org.hibernate.annotations.CacheConcurrencyStrategy.READ_WRITE) // 엔티티 2차 캐시(application.yml, 켜져 있을 때만)
 public class Level extends BaseTimeEntity {
     @Column(nullable = false) private long level;
     @Column(name = "required_exp", nullable = false) private long requiredExp;

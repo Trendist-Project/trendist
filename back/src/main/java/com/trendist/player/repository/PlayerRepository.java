@@ -35,6 +35,14 @@ public interface PlayerRepository extends JpaRepository<Player, Long> {
     @Query("update Player p set p.flameOutCount = p.flameOutCount + 1 where p.id = :id")
     int incrementFlameOutCount(@org.springframework.data.repository.query.Param("id") Long id);
 
+    /** 시작할 때 보유 수를 보관함에서 다시 센 값과 맞춰 볼 플레이어: DB에 보유가 있다고 적힌 사람, 또는 보관함에 행이 있는 사람 */
+    @Query("select p from Player p where p.holdCount > 0 or p.id in :ids")
+    List<Player> findForHoldReconcile(@Param("ids") java.util.Collection<Long> ids);
+
+    /** 나라별 활동 인원(탈퇴 제외): 주어진 플레이어 중 나라마다 몇 명인지 [나라 번호, 수] */
+    @Query("select p.country.id, count(p) from Player p join p.user u where p.id in :ids and u.userState.id <> :withdrawnStateId group by p.country.id")
+    List<Object[]> countByCountryExcludingWithdrawn(@Param("ids") java.util.Collection<Long> ids, @Param("withdrawnStateId") Long withdrawnStateId);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select p from Player p where p.id = :id")
     Optional<Player> findByIdForUpdate(@Param("id") Long id);
