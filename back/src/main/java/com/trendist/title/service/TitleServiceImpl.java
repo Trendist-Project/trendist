@@ -183,11 +183,11 @@ public class TitleServiceImpl implements TitleService {
     }
 
     /**
-     * RANK 칭호(4.10): 그 나라 리더보드(접속 중인 사람끼리의 순위, 4.14)를 10초마다 보고 N위 안의 사람에게 준다.
+     * RANK 칭호(4.10): 그 나라 리더보드(접속 중인 사람끼리의 순위, 4.14)를 1분마다 보고 N위 안의 사람에게 준다.
      * 리더보드는 방 메모리 값이라 DB를 보지 않는다. 혼자 있어도 1위가 되는 일을 막으려고, 접속 중인 사람이
      * `rank_title_min_players`(기본 10명) 이상일 때만 준다.
      */
-    @Scheduled(fixedDelay = 10_000, initialDelay = 15_000)
+    @Scheduled(fixedDelay = 60_000, initialDelay = 15_000) // 순위 칭호는 1분 늦어도 되고, 나라마다 순위를 읽으므로 자주 돌릴 이유가 없다
     public void checkRanks() {
         List<Cond> rank = conditions().stream().filter(c -> "RANK".equals(c.type()) && "current_score".equals(c.metric())).toList();
         if (rank.isEmpty()) return;

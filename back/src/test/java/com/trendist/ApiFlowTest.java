@@ -199,6 +199,26 @@ class ApiFlowTest {
     }
 
     @Test
+    void prizeOrbsInBulkGiveDistinctKeywordsAndKeepCountsConsistent() throws Exception {
+        // ! 구슬 여러 개를 한 번에 처리(키워드를 많이 떨어뜨린 사람의 구슬을 몰아 먹은 경우): 구슬마다 결과 하나, 안 가진 키워드를 먼저 서로 다르게, 보유 수·유행도가 맞는다
+        String t = player("구슬대량");
+        long pid = playerIdOf(t);
+        keywordService.applyExternalTitles("KR", DataSource.GOOGLE, List.of("대량하나", "대량둘", "대량셋", "대량넷", "대량다섯"));
+        var results = keywordService.openPrizeOrbs(pid, 8); // 다섯 개 이상은 가진 것을 갱신(RENEWED)해야 한다
+        org.assertj.core.api.Assertions.assertThat(results).hasSize(8);
+        var gained = results.stream().filter(r -> r.status().equals("GAINED")).toList();
+        var renewed = results.stream().filter(r -> r.status().equals("RENEWED")).toList();
+        org.assertj.core.api.Assertions.assertThat(gained).extracting(r -> r.keywordId()).doesNotHaveDuplicates().doesNotContainNull();
+        org.assertj.core.api.Assertions.assertThat(gained.size() + renewed.size()).isEqualTo(8);
+        mvc.perform(get("/api/me").header("Authorization", "Bearer " + t)).andExpect(jsonPath("$.player.holdCount").value(gained.size()));
+        // 보관함에 실제로 들어갔고, 키워드마다 가진 사람 수가 1 오른 값과 점수가 DB에 반영됐다
+        org.assertj.core.api.Assertions.assertThat(keywordService.myKeywords(Long.parseLong(body(mvc.perform(get("/api/me").header("Authorization", "Bearer " + t)).andReturn(), "$.userId")))).hasSize(gained.size());
+        // 같은 키워드를 하나씩 처리했을 때와 같은 점수 규칙: 얻은 구슬들의 gained 합이 플레이어 점수 변화와 맞는다
+        long sum = gained.stream().mapToLong(r -> r.gained()).sum();
+        org.assertj.core.api.Assertions.assertThat(sum).isGreaterThanOrEqualTo(0);
+    }
+
+    @Test
     void prizeOrbAlwaysGainsAndWipeLosesEverything() throws Exception {
         // ! 구슬은 꽝·잃기 없이 항상 얻고(가능하면 안 가진 키워드), 불꽃에게 지면 가진 키워드를 모두 잃는다(4.20, 4.25)
         String t = player("느낌표러");

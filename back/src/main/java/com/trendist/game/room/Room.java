@@ -777,6 +777,7 @@ public class Room {
         monsters.put(mo.id, mo);
         Map<String, Object> msg = new HashMap<>();
         msg.put("type", "monsterSpawn"); msg.put("id", mo.id); msg.put("name", spec.name()); msg.put("en", spec.nameEn()); msg.put("max", mo.maxHp);
+        if (spec.image() != null) msg.put("img", spec.image()); // 안내 메시지에 보스 그림을 띄우는 데 쓴다
         msg.put("durationMs", Math.round((mo.endsAt - mo.startedAt) * 1000));
         broadcast(msg);
         broadcast(mo.stateMessage(this));

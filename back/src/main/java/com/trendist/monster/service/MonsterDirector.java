@@ -162,7 +162,8 @@ public class MonsterDirector {
         if (announce > 0 && next - now <= announce && !alerted.contains(alertKey) && !active(room, nextBoss.type().getCode())
                 && room.size() >= pn.getOrDefault("min_players", 1.0)) {
             alerted.add(alertKey);
-            room.submit(r -> r.announce(Map.of("type", "monsterAlert", "name", nextBoss.type().getName(), "en", String.valueOf(nextBoss.type().getNameEn()), "seconds", next - System.currentTimeMillis() / 1000)));
+            room.submit(r -> r.announce(Map.of("type", "monsterAlert", "name", nextBoss.type().getName(), "en", String.valueOf(nextBoss.type().getNameEn()),
+                    "img", java.util.Objects.toString(nextBoss.type().getImage(), ""), "seconds", next - System.currentTimeMillis() / 1000)));
         }
         // 등장: 시간대가 시작한 뒤 grace_seconds 안일 때만
         MonsterCatalog.Entry e = pick(group, slot);

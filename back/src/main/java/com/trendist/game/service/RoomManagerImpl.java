@@ -120,7 +120,7 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
                     if (!z.equals(r.zoneTuning())) r.setZoneTuning(z);
                 });
             } catch (RuntimeException e) { log.warn("tuning refresh failed", e); }
-        }, 1, 1, TimeUnit.SECONDS);
+        }, 1, 10, TimeUnit.SECONDS); // 설정은 1분 캐시(SettingServiceImpl)라 1초마다 읽어도 새 값이 없다: 10초마다 방에 넣는다
         // 60초마다 방마다 🔥 키워드 목록을 새로 읽는다(봇의 키워드와 점수 계산, 4.21)
         tuningRefresher.scheduleAtFixedRate(() -> {
             try { rooms.forEach((id, r) -> loadCatalog(id, r, false)); } catch (RuntimeException e) { log.warn("bot catalog refresh failed", e); }
@@ -604,27 +604,81 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
         });
     }
 
+    /** 구슬 하나를 먹었다: 같은 플레이어의 구슬은 줄에 모아 한 DB 작업 칸에서 차례로 처리한다(아래 drainOrbs) */
+    private record OrbReq(Room room, boolean prize) {}
+    private static final int ORB_BULK_MAX = 200; // 한 번(DB 작업 칸 한 번 차지)에 줄에서 꺼내는 구슬 수
+    private static final int ORB_BULK_MIN = 3;   // ! 구슬이 이 개수 이상 쌓이면 묶음 SQL로 한 번에 처리한다
+    private final Map<Long, java.util.concurrent.ConcurrentLinkedQueue<OrbReq>> orbPending = new ConcurrentHashMap<>();
+    private final java.util.Set<Long> orbDraining = ConcurrentHashMap.newKeySet();
+
     @Override
     public void requestOrb(Room room, Room.Member eater, boolean prize) {
         long playerId = eater.playerId;
-        db("requestOrb", () -> {
-            try {
-                KeywordDtos.OrbResult r = prize ? keywordService.openPrizeOrb(playerId) : keywordService.openOrb(playerId);
-                Map<String, Object> msg = new HashMap<>();
-                msg.put("type", "orbResult");
-                msg.put("status", r.status());
-                if (r.text() != null) {
-                    msg.put("text", r.text()); msg.put("state", r.state()); msg.put("trendValue", r.trendValue());
-                    msg.put("holderCount", r.holderCount()); msg.put("gained", r.gained()); msg.put("expiresAt", String.valueOf(r.expiresAt()));
+        java.util.concurrent.ConcurrentLinkedQueue<OrbReq> q = orbPending.computeIfAbsent(playerId, k -> new java.util.concurrent.ConcurrentLinkedQueue<>());
+        boolean start;
+        synchronized (q) { q.add(new OrbReq(room, prize)); start = orbDraining.add(playerId); } // 이미 처리 중이면 그 처리가 이어서 가져간다
+        if (start) db("requestOrb", () -> drainOrbs(playerId, q));
+    }
+
+    /**
+     * 한 플레이어가 먹은 구슬을 줄에서 차례로 꺼내 **하나씩 따로 처리하고 바로 알린다**(구슬마다 자기 트랜잭션이라 커밋 직후 체력 회복·점수·결과가 바로 나간다).
+     * 한 묶음으로 처리하면 앞 구슬의 결과·회복 모션·소리가 묶음이 끝날 때까지 늦어져서 체감이 나빴다. 그래도 같은 플레이어의 구슬은 DB 작업 칸을 하나만 쓰고
+     * 서로 잠금을 기다리지 않는다. 한 번에 줄에서 꺼내는 만큼(ORB_BULK_MAX)만 처리하고 남으면 줄의 맨 뒤로 다시 들어가 다른 사람의 작업에 양보한다.
+     */
+    private void drainOrbs(long playerId, java.util.concurrent.ConcurrentLinkedQueue<OrbReq> q) {
+        java.util.List<OrbReq> batch = new java.util.ArrayList<>();
+        try {
+            // 줄에 쌓인 것을 한꺼번에 꺼낸다. ! 구슬이 ORB_BULK_MIN개 이상 쌓였으면(키워드를 많이 떨어뜨린 사람의 구슬을 몰아 먹은 경우) 묶음 SQL로 한 번에 처리한다
+            for (int i = 0; i < ORB_BULK_MAX; i++) { OrbReq r = q.poll(); if (r == null) break; batch.add(r); }
+            if (batch.isEmpty()) return;
+            java.util.List<OrbReq> prizes = batch.stream().filter(OrbReq::prize).toList();
+            boolean bulk = prizes.size() >= ORB_BULK_MIN;
+            perf.value("구슬 한 번에 꺼낸 개수", batch.size());
+            if (bulk) {
+                try {
+                    java.util.List<KeywordDtos.OrbResult> results = keywordService.openPrizeOrbs(playerId, prizes.size());
+                    for (int i = 0; i < prizes.size() && i < results.size(); i++) sendOrb(playerId, prizes.get(i).room(), results.get(i));
+                } catch (RuntimeException e) {
+                    log.warn("prize orb bulk of {} failed for player {}; retrying one by one", prizes.size(), playerId, e);
+                    for (OrbReq r : prizes) processOrb(playerId, r);
                 }
-                room.submit(rr -> {
-                    Room.Member m = rr.byPlayer(playerId);
-                    if (m != null) sendText(m, msg);
-                });
-            } catch (RuntimeException e) {
-                log.warn("orb reward failed for player {}", playerId, e);
             }
+            for (OrbReq r : batch) if (!bulk || !r.prize()) processOrb(playerId, r); // 묶음에 넣지 않은 구슬은 하나씩 바로 처리하고 알린다
+        } finally {
+            boolean more;
+            synchronized (q) { more = !q.isEmpty(); if (!more) orbDraining.remove(playerId); }
+            if (more) db("requestOrb", () -> drainOrbs(playerId, q));
+        }
+    }
+
+    /** 구슬 하나를 처리하고(자기 트랜잭션) 바로 알린다 */
+    private void processOrb(long playerId, OrbReq r) {
+        try {
+            KeywordDtos.OrbResult res = r.prize() ? keywordService.openPrizeOrb(playerId) : keywordService.openOrb(playerId);
+            sendOrb(playerId, r.room(), res);
+        } catch (RuntimeException e) {
+            log.warn("orb reward failed for player {}", playerId, e);
+        }
+    }
+
+    private void sendOrb(long playerId, Room room, KeywordDtos.OrbResult res) {
+        Map<String, Object> msg = orbMessage(res);
+        room.submit(rr -> {
+            Room.Member m = rr.byPlayer(playerId);
+            if (m != null) sendText(m, msg);
         });
+    }
+
+    private static Map<String, Object> orbMessage(KeywordDtos.OrbResult r) {
+        Map<String, Object> msg = new HashMap<>();
+        msg.put("type", "orbResult");
+        msg.put("status", r.status());
+        if (r.text() != null) {
+            msg.put("text", r.text()); msg.put("state", r.state()); msg.put("trendValue", r.trendValue());
+            msg.put("holderCount", r.holderCount()); msg.put("gained", r.gained()); msg.put("expiresAt", String.valueOf(r.expiresAt()));
+            if (r.keywordId() != null) msg.put("keywordId", r.keywordId()); // 보관함을 다시 읽지 않고 화면이 목록을 직접 고치는 데 쓴다
+        }
+        return msg;
     }
 
     @Override

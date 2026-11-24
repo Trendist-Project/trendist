@@ -44,7 +44,12 @@ public final class KeywordDtos {
 
     /** 구슬을 먹은 결과(4.20). status: GAINED(새로 추가) / RENEWED(이미 보유, 만료시간만 갱신) / LOST(내 키워드 하나를 잃음, gained = 줄어든 유행도) / MISS(잃을 키워드도 없는 꽝) / NONE(🔥 키워드 없음). */
     public record OrbResult(String status, String text, String state, Long trendValue, long holderCount,
-                            Long gained, Instant expiresAt) {}
+                            Long gained, Instant expiresAt, Long keywordId) {
+        /** 키워드 번호 없이 만드는 결과(NONE·MISS처럼 키워드가 없거나 호출하는 쪽이 번호를 쓰지 않는 경우) */
+        public OrbResult(String status, String text, String state, Long trendValue, long holderCount, Long gained, Instant expiresAt) {
+            this(status, text, state, trendValue, holderCount, gained, expiresAt, null);
+        }
+    }
 
     public record PlusResult(KeywordCard keyword, long gained, PlayerDtos.PlayerSummary player) {}
 

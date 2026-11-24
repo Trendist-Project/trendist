@@ -13,6 +13,9 @@ import org.springframework.data.repository.query.Param;
 public interface PlayerKeywordRepository extends JpaRepository<PlayerKeyword, Long> {
     Optional<PlayerKeyword> findByPlayerIdAndKeywordId(Long playerId, Long keywordId);
 
+    /** 이 플레이어가 가진(만료된 행 포함) 보관함 행 중 주어진 키워드의 것(구슬 여러 개를 한꺼번에 처리할 때 한 번에 읽는다) */
+    List<PlayerKeyword> findByPlayerIdAndKeywordIdIn(Long playerId, java.util.Collection<Long> keywordIds);
+
     @Query("""
             select pk from PlayerKeyword pk join fetch pk.keyword k join fetch k.keywordState
             where pk.player.id = :playerId and pk.expiresAt > :now and k.keywordState.id <> :bannedStateId

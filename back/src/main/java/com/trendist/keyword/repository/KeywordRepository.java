@@ -18,6 +18,11 @@ public interface KeywordRepository extends JpaRepository<Keyword, Long> {
     @Query("select k from Keyword k where k.id = :id")
     Optional<Keyword> findByIdForUpdate(@Param("id") Long id);
 
+    /** 여러 키워드를 번호 순으로 한 번에 잠그며 읽는다(잠금 순서가 일정해 교착하지 않는다) */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select k from Keyword k where k.id in :ids order by k.id")
+    List<Keyword> findAllByIdForUpdate(@Param("ids") java.util.Collection<Long> ids);
+
     /** AI 설명을 아직 못 받은 키워드(처음 🔥가 된 적 있고, 금지 아님, 설명 행이 없거나 설명이 비고 시도 횟수가 한도 미만). 최근에 🔥가 된 것부터 */
     @Query("""
             select k.id from Keyword k left join k.aiComment a

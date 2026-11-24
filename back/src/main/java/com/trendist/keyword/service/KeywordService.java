@@ -140,6 +140,13 @@ public interface KeywordService {
     /** ! 구슬을 먹었다(4.20). 꽝 없이 항상 🔥 키워드를 얻는다(가능하면 내 보관함에 없는 것). */
     KeywordDtos.OrbResult openPrizeOrb(long playerId);
 
+    /**
+     * ! 구슬 여러 개를 한 번에 처리한다(키워드를 많이 떨어뜨린 사람의 구슬을 몰아 먹을 때). 구슬마다 처리하면 수십 초가 걸려서, 키워드를 모아 읽고 한 번에 쓴다.
+     * 결과는 구슬 순서대로 count개를 돌려주며 구슬 하나씩 처리한 것과 같은 규칙(안 가진 키워드를 먼저, 없으면 시간만 갱신)이다.
+     */
+    java.util.List<KeywordDtos.OrbResult> openPrizeOrbs(long playerId, int count);
+
+
     /** 보스 처치 보상 키워드 하나(4.35): ! 구슬과 같은 규칙으로 🔥 키워드를 얻지만 구슬을 먹은 횟수(orb_count)와 구슬 통계에는 세지 않는다. */
     KeywordDtos.OrbResult grantRewardKeyword(long playerId);
 

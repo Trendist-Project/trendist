@@ -211,9 +211,113 @@ public class KeywordServiceImpl implements KeywordService {
         return openOrb(playerId, true, false);
     }
 
+    @Override
+    @Transactional
+    public List<KeywordDtos.OrbResult> openPrizeOrbs(long playerId, int count) {
+        List<KeywordDtos.OrbResult> out = new ArrayList<>(count);
+        if (count <= 0) return out;
+        Player p = players.findByIdForUpdate(playerId).orElse(null);
+        KeywordDtos.OrbResult none = new KeywordDtos.OrbResult("NONE", null, null, null, 0, null, null);
+        if (p == null) { for (int i = 0; i < count; i++) out.add(none); return out; }
+        Country country = p.getCountry();
+        long countryId = country.getId();
+        Instant now = Instant.now(clock);
+        for (int i = 0; i < count; i++) { // 먹은 횟수는 구슬마다 센다(칭호, 사이트 통계)
+            activity.add(countryId, com.trendist.stats.support.ActivityCounter.Kind.ORB);
+            p.incOrb();
+        }
+        events.publishEvent(new GameEvents.TitleCheck(p.getId()));
+        List<Long> ids = activeIds(countryId, false);
+        if (ids.isEmpty()) { for (int i = 0; i < count; i++) out.add(none); return out; }
+
+        // 안 가진 키워드를 먼저 고르고(구슬마다 하나씩), 모자라면 이미 가진 키워드의 시간만 갱신한다
+        Set<Long> held = heldCoveredIds(p.getId(), now);
+        List<Long> fresh = new ArrayList<>(ids.stream().filter(id -> !held.contains(id)).toList());
+        Collections.shuffle(fresh, ThreadLocalRandom.current());
+        int gainN = Math.min(count, fresh.size());
+        List<Long> gainIds = new ArrayList<>(fresh.subList(0, gainN));
+        List<Long> renewIds = new ArrayList<>();
+        for (int i = gainN; i < count; i++) renewIds.add(ids.get(ThreadLocalRandom.current().nextInt(ids.size())));
+
+        Set<Long> allIds = new TreeSet<>(gainIds);
+        allIds.addAll(renewIds);
+        Map<Long, Keyword> byId = new HashMap<>();
+        for (Keyword k : keywords.findAllByIdForUpdate(allIds)) byId.put(k.getId(), k); // 번호 순으로 한 번에 잠근다
+        Map<Long, PlayerKeyword> rowOf = new HashMap<>();
+        for (PlayerKeyword pk : playerKeywords.findByPlayerIdAndKeywordIdIn(p.getId(), allIds)) rowOf.put(pk.getKeyword().getId(), pk);
+
+        Instant expires = now.plus(Duration.ofHours(settings.getInt(SettingKeys.PLUS_TTL_HOURS)));
+        long oldScore = p.getCurrentScore() - p.getLevel();
+        Map<Long, long[]> trendChange = new LinkedHashMap<>(); // {old, new}
+        Set<Long> newHolderIds = new HashSet<>();
+        for (Long id : gainIds) {
+            Keyword k = byId.get(id);
+            if (k == null) continue;
+            PlayerKeyword pk = rowOf.get(id);
+            long oldTrend = k.getTrendValue();
+            if (pk == null) { playerKeywords.save(new PlayerKeyword(p, k, now, expires)); k.incHolder(); newHolderIds.add(id); }
+            else pk.renew(now, expires); // 만료 행 재사용: 가진 사람 수는 그대로
+            k.incAdd();
+            trendChange.put(id, new long[]{oldTrend, updateTrend(k)});
+        }
+        for (Long id : renewIds) {
+            PlayerKeyword pk = rowOf.get(id);
+            if (pk != null && !pk.isExpired(now)) pk.renew(now, expires); // 직접 가진 행만 갱신(합성 키워드 안의 원본은 그대로)
+        }
+        keywords.flush();
+        playerKeywords.flush();
+
+        // 플레이어: 얻은 구슬 수만큼 추가·EXP, 새로 가진 수만큼 보유(키워드를 얻은 구슬만 센다)
+        int newHolders = newHolderIds.size();
+        for (int i = 0; i < gainIds.size(); i++) { p.incAdd(); p.addExp(settings.getInt(SettingKeys.EXP_PER_PLUS)); }
+        for (int i = 0; i < newHolders; i++) p.incHold();
+        if (!gainIds.isEmpty()) p.touchPlayed(now, ZoneId.of(p.getCountry().getTimezone()));
+        long newScore = playerService.recompute(p); // 위 묶음 SQL이 반영된 합으로 한 번만 다시 계산한다
+        long totalGained = newScore - p.getLevel() - oldScore;
+
+        for (Map.Entry<Long, long[]> e : trendChange.entrySet()) {
+            dirtyKeywords.add(e.getKey());
+            long delta = e.getValue()[1] - e.getValue()[0];
+            if (delta != 0) events.publishEvent(new GameEvents.KeywordTrendChanged(countryId, e.getKey(), delta, p.getId()));
+        }
+        // 결과: 구슬마다 하나(먹은 순서대로). 키워드를 얻은 구슬은 그 키워드의 점수를, 나머지 점수 변화(EXP·레벨)는 마지막 얻은 구슬에 얹는다
+        long sumGain = 0;
+        List<KeywordDtos.OrbResult> gains = new ArrayList<>();
+        for (Long id : gainIds) {
+            Keyword k = byId.get(id);
+            if (k == null) { gains.add(none); continue; }
+            long nt = trendChange.get(id)[1];
+            long g = isState(k, CodeTables.KW_ACTIVE) ? nt : 0;
+            sumGain += g;
+            boolean newHolder = newHolderIds.contains(id);
+            gains.add(new KeywordDtos.OrbResult("GAINED", k.getText(), k.getKeywordState().getName(), nt, k.getHolderCount(), g, expires, id));
+            if (newHolder) {
+                events.publishEvent(new GameEvents.HoldingChanged(countryId, p.getId(), id, true));
+                events.publishEvent(new GameEvents.KeywordGained(countryId, p.getId(), isState(k, CodeTables.KW_ACTIVE) ? nt : 0, newScore)); // 체력 회복(4.36)
+            }
+        }
+        if (!gains.isEmpty()) {
+            int last = gains.size() - 1;
+            KeywordDtos.OrbResult l = gains.get(last);
+            if (l.keywordId() != null) gains.set(last, new KeywordDtos.OrbResult(l.status(), l.text(), l.state(), l.trendValue(), l.holderCount(), l.gained() + (totalGained - sumGain), l.expiresAt(), l.keywordId()));
+        }
+        out.addAll(gains);
+        for (Long id : renewIds) {
+            Keyword k = byId.get(id);
+            if (k == null) { out.add(none); continue; }
+            out.add(new KeywordDtos.OrbResult("RENEWED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(), k.getHolderCount(), 0L, expires, id));
+        }
+        return out;
+    }
+
     private KeywordDtos.OrbResult openOrb(long playerId, boolean prize, boolean countOrb) {
         Player p = players.findByIdForUpdate(playerId).orElse(null);
         if (p == null) return new KeywordDtos.OrbResult("NONE", null, null, null, 0, null, null);
+        return openOrbFor(p, prize, countOrb);
+    }
+
+    /** 이미 잠근 플레이어 p의 구슬 하나를 처리한다 */
+    private KeywordDtos.OrbResult openOrbFor(Player p, boolean prize, boolean countOrb) {
         if (countOrb) {
             activity.add(p.getCountry().getId(), com.trendist.stats.support.ActivityCounter.Kind.ORB); // 사이트 통계(13.9)
             p.incOrb(); // 꽝이어도 먹은 횟수는 센다(칭호, 4.10). 보스 보상 키워드는 구슬이 아니라 세지 않는다
@@ -243,11 +347,11 @@ public class KeywordServiceImpl implements KeywordService {
         if (holding.isPresent()) {
             // 이미 보관함에 있는 키워드가 나오면 남은 시간만 지금부터 다시 24시간(사람에게서 빼앗을 때(4.3)와 같게). 점수·EXP는 그대로
             return new KeywordDtos.OrbResult("RENEWED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
-                    k.getHolderCount(), 0L, renewHolding(holding.get(), now));
+                    k.getHolderCount(), 0L, renewHolding(holding.get(), now), k.getId());
         }
         Added r = addHoldingCore(p, k, existing, now);
         return new KeywordDtos.OrbResult("GAINED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
-                k.getHolderCount(), r.gained(), r.expires());
+                k.getHolderCount(), r.gained(), r.expires(), k.getId());
     }
 
     /** 나라의 🔥활성 일반 키워드 번호 목록과 읽은 시각 */
@@ -318,11 +422,11 @@ public class KeywordServiceImpl implements KeywordService {
         if (holding.isPresent()) {
             // 이미 가진 키워드: 사람에게서 빼앗을 때와 같이 남은 시간만 지금부터 다시 24시간(4.3)
             return new KeywordDtos.OrbResult("RENEWED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
-                    k.getHolderCount(), 0L, renewHolding(holding.get(), now));
+                    k.getHolderCount(), 0L, renewHolding(holding.get(), now), k.getId());
         }
         Added r = addHoldingCore(p, k, existing, now);
         return new KeywordDtos.OrbResult("GAINED", k.getText(), k.getKeywordState().getName(), k.getTrendValue(),
-                k.getHolderCount(), r.gained(), r.expires());
+                k.getHolderCount(), r.gained(), r.expires(), k.getId());
     }
 
     // ---------------------------------------------------------------- 목록형 외부 소스(10.2)
