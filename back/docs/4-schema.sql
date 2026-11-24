@@ -246,6 +246,21 @@ CREATE TABLE key_bindings (
   CONSTRAINT fk_key_bindings_key FOREIGN KEY (key_id) REFERENCES keyboard_keys (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='플레이어가 바꾼 단축키(4.33). 바꾼 것만 저장하고, 기본 키와 같아지면 행을 지운다';
 
+CREATE TABLE user_sound_settings (
+  id            BIGINT NOT NULL AUTO_INCREMENT COMMENT '소리 설정 ID',
+  user_id       BIGINT NOT NULL COMMENT '사용자(계정) ID. 나라와 무관하게 계정마다 한 줄',
+  sfx_on        BOOLEAN NOT NULL COMMENT '효과음 켜짐',
+  bgm_on        BOOLEAN NOT NULL COMMENT '배경음 켜짐',
+  master_volume INT NOT NULL COMMENT '마스터 음량 0~100',
+  sfx_volume    INT NOT NULL COMMENT '효과음 음량 0~100',
+  bgm_volume    INT NOT NULL COMMENT '배경음 음량 0~100',
+  created_at    DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '만든 시각',
+  updated_at    DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT '바뀐 시각',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_user_sound_settings_user (user_id),
+  CONSTRAINT fk_user_sound_settings_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='계정별 소리 설정(4.39, V81). 행이 없으면 저장한 적이 없는 것(화면이 이 브라우저의 값을 올려 보낸다)';
+
 CREATE TABLE player_skill_slots (
   id         BIGINT NOT NULL AUTO_INCREMENT COMMENT '장착 ID',
   player_id  BIGINT NOT NULL COMMENT '플레이어 ID',
