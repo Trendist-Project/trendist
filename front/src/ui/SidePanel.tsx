@@ -7,7 +7,7 @@ import { remaining, shortLeft, STATE_BADGE } from './keywordFormat';
 import { fmtNumber, t } from '../i18n';
 import { getLang } from '../country';
 import { PlayerSearch } from './PlayerSearch';
-import { starLabel } from './mergeFormat';
+import { DEFAULT_GRADE_MINS, starLabel, tierOf } from './mergeFormat';
 import { StarRow } from './StarRow';
 import { ScrollRow } from './ScrollRow';
 import { useLayer } from './layers';
@@ -427,9 +427,6 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
 }
 
 /** 점수(트렌드 값, 가진 사람이 많을수록 오른다)에 따른 카드 등급: 0 기본 · 1 주목(15~) · 2 인기(30~) · 3 대세(50~) · 4 전설(100~, 합성 키워드가 주로 닿는다). 점수에는 상한이 없다 */
-/** 기본 등급 기준: 일반 키워드 1개의 최고 점수 70(= 50 + 20자 × 1)을 노멀의 끝으로, 그 위는 2·4·8·16배. 서버가 설정에 맞춰 계산한 값(/api/keywords/grades)을 받으면 그 값을 쓴다 */
-const DEFAULT_GRADE_MINS = [71, 140, 280, 560, 1120];
-const tierOf = (score: number, mins: number[]) => { let t = 0; mins.forEach((m, i) => { if (score >= m) t = i + 1; }); return t; };
 
 type Fx = 'yes' | 'bonus' | null;
 

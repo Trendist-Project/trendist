@@ -32,6 +32,7 @@ export default {
   sortActiveAria: '{label} {dir}, 눌러서 순서 바꾸기',
   sortByAria: '{label}으로 정렬',
   openAria: '{kw} 자세히 보기',
+  tier0: '노멀',
   tier1: '레어',
   tier2: '에픽',
   tier3: '유니크',

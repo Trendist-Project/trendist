@@ -189,7 +189,7 @@ export function KeywordDetail({ keywordId, onLoaded, onPlused, onError, reportin
  * 내가 가진 키워드의 남은 시간(보관함 카드와 같은 모양): 게이지(24시간 기준)와 오른쪽 끝의 `23h 남음` / `32m 남음`.
  * 절반 아래는 주황, 1시간 아래는 빨강. 30초마다 다시 계산한다.
  */
-function HoldGauge({ expiresAt }: { expiresAt: string }) {
+export function HoldGauge({ expiresAt }: { expiresAt: string }) {
   const [, tick] = useState(0);
   useEffect(() => { const id = window.setInterval(() => tick((n) => n + 1), 30_000); return () => window.clearInterval(id); }, []);
   const left = new Date(expiresAt).getTime() - Date.now();

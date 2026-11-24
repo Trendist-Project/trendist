@@ -4,17 +4,18 @@ import { niceMax, smoothPath } from './chartMath';
 import { intlLocale } from './keywordFormat';
 import { fmtNumber, t } from '../i18n';
 
-const HEIGHT = 200;
+const DEFAULT_HEIGHT = 200;
 const PAD = { top: 18, right: 40, bottom: 26, left: 34 };
 const COLORS = { search: '#5aa9e6', plus: '#3fb68b', holders: '#f2b84b' };
 
-interface Props { activity: Activity; showHolders: boolean }
+interface Props { activity: Activity; showHolders: boolean; height?: number }
 
 /**
  * 키워드 활동 그래프(4.12). 검색수(실선)와 추가수(파선)를 부드러운 곡선으로 그리고, 켜면 가진 사람 수를 오른쪽 축의 점선으로 겹친다.
  * 이번 시간·오늘은 집계 중이라 마지막 구간을 점선으로 그리고 끝점이 깜빡인다. 가장 높은 점에 "최고"를 단다.
  */
-export function ActivityChart({ activity, showHolders }: Props) {
+export function ActivityChart({ activity, showHolders, height }: Props) {
+  const HEIGHT = height ?? DEFAULT_HEIGHT; // 좁거나 낮은 화면에서는 호출하는 쪽이 줄여 쓴다
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(560);
   const [hover, setHover] = useState<number | null>(null);
@@ -24,13 +25,13 @@ export function ActivityChart({ activity, showHolders }: Props) {
   // 처음 그릴 때부터 실제 칸 너비로 그린다(기본값으로 먼저 그리면 창이 그만큼 넓어져서 다시 재도 넓게 나온다)
   useLayoutEffect(() => {
     const el = wrapRef.current;
-    if (el && el.clientWidth > 0) setWidth(Math.max(260, el.clientWidth));
+    if (el && el.clientWidth > 0) setWidth(Math.max(200, el.clientWidth));
   }, []);
 
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(([entry]) => setWidth(Math.max(260, Math.floor(entry.contentRect.width))));
+    const ro = new ResizeObserver(([entry]) => setWidth(Math.max(200, Math.floor(entry.contentRect.width))));
     ro.observe(el);
     return () => ro.disconnect();
   }, []);

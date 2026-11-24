@@ -32,6 +32,7 @@ export default {
   sortActiveAria: '{label} {dir}, press to reverse the order',
   sortByAria: 'Sort by {label}',
   openAria: 'View {kw} details',
+  tier0: 'Normal',
   tier1: 'Rare',
   tier2: 'Epic',
   tier3: 'Unique',
