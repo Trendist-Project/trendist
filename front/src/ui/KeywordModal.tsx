@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiFailure } from '../api/client';
+import { visibleInterval } from './visibleInterval';
 import type { Activity, ActivityRange, KeywordCard, PlayerSummary } from '../api/types';
 import { ActivityChart } from './ActivityChart';
 import { GeminiIcon } from './GeminiIcon';
@@ -86,8 +87,7 @@ export function KeywordDetail({ keywordId, onLoaded, onPlused, onError, reportin
   // 이번 시간은 집계 중이라 창이 열려 있는 동안 1분마다 다시 읽는다
   useEffect(() => {
     loadActivity();
-    const t = window.setInterval(loadActivity, 60_000);
-    return () => clearInterval(t);
+    return visibleInterval(loadActivity, 60_000);
   }, [loadActivity]);
 
   useEffect(() => { try { localStorage.setItem(HOLDERS_KEY, showHolders ? '1' : '0'); } catch { /* 이 브라우저에만 기억 */ } }, [showHolders]);

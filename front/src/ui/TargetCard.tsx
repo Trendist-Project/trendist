@@ -1,6 +1,7 @@
 import { useLayer } from './layers';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
+import { visibleInterval } from './visibleInterval';
 import type { KeywordTag } from '../api/types';
 import { fmtNumber, t } from '../i18n';
 import type { OrbLook } from '../game/skin';
@@ -61,8 +62,8 @@ export function TargetCard({ entityNo, following, touchKey, read, onClose, onDet
     let alive = true;
     const load = () => api.roomPlayer(entityNo).then((c) => { if (alive) setKeywords(c.topKeywords); }).catch(() => { /* 키워드만 못 보인다 */ });
     load();
-    const id = window.setInterval(load, 5000);
-    return () => { alive = false; window.clearInterval(id); };
+    const stop = visibleInterval(load, 5000);
+    return () => { alive = false; stop(); };
   }, [entityNo, bot]);
 
   // 왼쪽으로 밀어서 치우기: 손가락(마우스)을 따라 움직이다가 충분히 밀었거나 빠르게 쓸었으면 밀려나가고, 아니면 제자리로 돌아온다.

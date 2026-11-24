@@ -17,11 +17,14 @@ const nameOf = (name: string, en: string) => (getLang() === 'en' && en ? en : na
  * 보스 체력 막대(4.35): 화면 위 가운데. 이름·남은 시간·체력·분노·불꽃 상태와 내가 입힌 피해.
  * read는 Arena가 들고 있는 현재 상태를 읽는 함수이고, 5번/초 다시 읽는다. 보스가 없으면 아무것도 그리지 않는다.
  */
+const shallowSame = (a: object, b: object) => { const ka = Object.keys(a), kb = Object.keys(b); return ka.length === kb.length && ka.every((k) => (a as Record<string, unknown>)[k] === (b as Record<string, unknown>)[k]); };
+
 export function MonsterHud({ read, mine, onBottom }: { read: () => Hud | null; mine: { dmg: number; hits: number }; onBottom?: (px: number) => void }) {
   const [hud, setHud] = useState<Hud | null>(null);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const id = window.setInterval(() => setHud(read()), 200);
+    // 값이 그대로면 이전 객체를 유지해 다시 그리지 않는다(5번/초 읽어도 남은 시간·체력이 바뀔 때만 그려진다)
+    const id = window.setInterval(() => setHud((prev) => { const next = read(); return prev && next && shallowSame(prev, next) ? prev : next; }), 200);
     return () => window.clearInterval(id);
   }, [read]);
   // 띠의 아래 끝(아레나 기준 px)을 재서 미니맵에 알린다(화면 크기·글자 크기가 바뀌어도 맞는다). 보스가 없으면 0

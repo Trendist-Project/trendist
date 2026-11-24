@@ -204,6 +204,7 @@ kbd { font: inherit; font-size: 0.75rem; border: 1px solid var(--line); border-r
 @keyframes death-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .arena { transition: none; } .death-box { animation: none; } }
 .toast { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); background: #2b1b1b; border: 1px solid #ff7a7a; padding: 10px 16px; border-radius: 10px; }
+.toast-img { width: 1.6em; height: 1.6em; margin-right: 8px; vertical-align: -0.4em; object-fit: contain; } /* 보스 안내 앞의 보스 그림 */
 /* 공격 성공(4.3): 위쪽 가운데, 잃었다는 알림보다 한 줄 아래 */
 .toast.hit-toast { top: 108px; background: #13281f; border-color: var(--accent); font-weight: 700; animation: hit-pop 0.35s ease-out; max-width: calc(100% - 32px); text-align: center; }
 @keyframes hit-pop { from { transform: translateX(-50%) scale(0.85); opacity: 0; } to { transform: translateX(-50%) scale(1); opacity: 1; } }
@@ -1963,7 +1964,7 @@ button.link-back:hover { color: var(--text); }
 .merge-banner { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; margin-bottom: 8px; border-radius: 10px; border: 1px solid var(--accent); background: rgba(63,182,139,0.12); font-size: 0.85rem; }
 .merge-drag-hint { margin: 8px 2px 0; }
 @media (pointer: coarse) { .merge-drag-hint { display: none; } }
-.list.merge-active .merge-source { outline: 2px solid var(--accent); outline-offset: -1px; }
+.list.merge-active .merge-source { outline: 0; } /* 합성 출발 카드의 노란 테두리는 아래 ::after(맨 끝 규칙)로 그린다 */
 .list.merge-active .merge-ok { box-shadow: inset 0 0 0 2px rgba(63,182,139,0.7); }
 .list.merge-active .merge-bad button.mine-open { opacity: 0.4; }
 .list.merge-active .merge-bad { cursor: not-allowed; }
@@ -2027,6 +2028,13 @@ button.link-back:hover { color: var(--text); }
 .mine-card:not(.merged) .mine-stars { color: #d9b86a; }
 .mine-card .mine-row1 .mine-score { margin-left: 0; }
 .mine-tags { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.mine-pending { list-style: none; min-height: 56px; display: flex; align-items: center; padding: 10px 12px; }
+.mine-pending-body { display: flex; align-items: center; gap: 10px; min-width: 0; width: 100%; }
+.mine-pending-body strong { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mine-pending-spin { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 3px solid rgba(255,210,31,0.3); border-top-color: #ffd21f; animation: mine-spin 0.8s linear infinite; }
+@keyframes mine-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .mine-pending-spin { animation: none; } }
+.mine-queued { flex: none; min-width: 1.5em; padding: 1px 6px; border-radius: 999px; font-size: 0.7rem; font-weight: 800; text-align: center; color: #3a2a00; background: #ffd21f; } /* 합성 대기 순서 */
 .mine-fail { flex: none; padding: 1px 6px; border-radius: 999px; font-size: 0.68rem; font-weight: 700; font-variant-numeric: tabular-nums; color: #ffb4b4; background: rgba(239,90,90,0.14); border: 1px solid rgba(239,90,90,0.4); }
 .mine-len { flex: none; min-width: 1.6em; padding: 1px 6px; border-radius: 999px; font-size: 0.7rem; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums;
   color: var(--muted); border: 1px solid var(--line); }
@@ -2207,6 +2215,11 @@ button.link-back:hover { color: var(--text); }
 .merged-sum-formula { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .merged-sum-formula .merged-mult { padding: 0; border: 0; border-radius: 0; font-size: inherit; color: inherit; display: inline-flex; align-items: center; gap: 3px; }
 .merged-mult-star { width: 1em; height: 1em; flex: none; fill: #ffc83d; } /* 글자 별(★)은 글꼴마다 높이가 달라 줄에서 튀어 나오므로 그림으로 그려 글자와 같은 높이에 맞춘다 */
+/* 합계 줄의 왼쪽(남은 시간 바+글자)과 오른쪽(구성 합 식)은 같은 높이의 줄로 맞춰 위아래가 틀어지지 않게 한다 */
+.merged-legend li.sum { align-items: center; }
+.merged-hold, .merged-sum-formula { display: flex; align-items: center; min-height: 26px; line-height: 1; }
+.merged-hold .kw-hold { width: 100%; align-items: center; }
+.merged-hold .kw-hold-left { line-height: 1; }
 .merged-hold { flex: 1 1 auto; min-width: 90px; max-width: 200px; } /* 합계 줄 왼쪽: 남은 시간 바와 글자 */
 .merged-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.85rem; color: var(--muted); }
 .merged-meta b { color: var(--text); font-weight: 700; }
@@ -2263,3 +2276,42 @@ button.link-back:hover { color: var(--text); }
 .merged-part-fill { flex: 1 1 auto; }
 .merged-part-head .merged-part-caret { flex: none; margin: 0; padding: 6px 8px; border: 0; background: transparent; color: var(--muted); cursor: pointer; line-height: 1; }
 .merged-part-head .merged-part-caret:hover { color: var(--text); }
+
+/* 합성하려고 [🔗]를 누른 출발 카드: 진한 노란 테두리(카드 안쪽에 그려서 화면 밖 카드를 건너뛰는 설정에도 잘리지 않는다) */
+.list.merge-active li.mine-card.merge-source::after { content: ''; position: absolute; inset: 0; z-index: 4; pointer-events: none; border-radius: 8px;
+  border: 4px solid #ffd21f; box-shadow: inset 0 0 14px rgba(255,210,31,0.65); }
+
+/* 모바일 세로(폭 520px 이하): 합성 키워드 상세 팝업이 잘리지 않고 글자가 작게 보이도록 줄바꿈·축소한다 */
+@media (max-width: 520px) {
+  .merged-modal .modal-head { padding: 10px 12px; gap: 6px; }
+  .merged-modal .modal-title h2, .merged-modal .modal-head h2 { font-size: 0.98rem; line-height: 1.3; overflow-wrap: anywhere; }
+  .merged-modal .kw-share { padding: 3px 8px; font-size: 0.72rem; }
+  .merged-modal .modal-body { padding: 10px 12px 14px; gap: 10px; font-size: 0.84rem; }
+  .merged-hero { padding: 10px 12px; gap: 8px; }
+  .merged-grade { font-size: 0.68rem; padding: 1px 8px; }
+  .merged-stars { font-size: 0.8rem; letter-spacing: 1px; }
+  .merged-score-row { --score-fs: clamp(1.35rem, 7.5vw, 1.7rem); gap: 6px 10px; }
+  .merged-hero .kw-score span { font-size: 0.8rem; }
+  .merged-legend { font-size: 0.72rem; gap: 3px 10px; }
+  /* 합계 줄: [남은 시간 바 + 글자] [구성 합 × ★(n)]을 한 줄에. 바가 남는 폭만큼 늘었다 줄었다 해서 좁은 폰에서도 한 줄에 들어간다 */
+  .merged-legend li.sum { flex-wrap: nowrap; white-space: nowrap; justify-content: flex-start; gap: 16px; } /* 왼쪽 바와 오른쪽 식 사이를 띄운다 */
+  .merged-hold { flex: 1 1 0; min-width: 0; max-width: none; }
+  .merged-hold .kw-hold { gap: 5px; }
+  .merged-hold .kw-hold-gauge { min-width: 24px; } /* 아무리 좁아도 바가 아주 사라지지는 않게 */
+  .merged-hold .kw-hold-left { font-size: 0.66rem; }
+  .merged-sum-formula { flex: none; margin-left: 0; font-size: 0.74rem; gap: 4px; }
+  .merged-meta { font-size: 0.74rem; gap: 4px 12px; }
+  .kw-activity-toggle h3, .merged-parts h3 { font-size: 0.9rem; }
+  .merged-modal .chip { padding: 3px 9px; font-size: 0.72rem; }
+  .merged-modal .toggle.small { font-size: 0.72rem; }
+  .merged-modal .muted.small, .merged-modal .small { font-size: 0.72rem; }
+  .merged-part-toggle { padding: 7px 9px; gap: 5px; font-size: 0.78rem; }
+  .merged-part-toggle .mine-score, .merged-part-toggle .badge { font-size: 0.68rem; padding: 1px 7px; }
+  .merged-part-ai-line { font-size: 0.7rem; }
+  .merged-part-body p, .merged-part-note { font-size: 0.78rem; }
+  .merged-part .merged-part-detail { padding: 8px 9px 10px; gap: 8px; }
+  .merged-part .kw-hero { padding: 8px 10px; }
+  .merged-part .kw-score strong { font-size: 1.4rem; }
+  .merged-part .kw-stats div { padding: 6px 8px; }
+  .merged-part .kw-stats dt, .merged-part .kw-stats dd { font-size: 0.74rem; }
+}

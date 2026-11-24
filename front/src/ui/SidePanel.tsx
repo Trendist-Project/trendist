@@ -9,6 +9,8 @@ import { getLang } from '../country';
 import { PlayerSearch } from './PlayerSearch';
 import { DEFAULT_GRADE_MINS, starLabel, tierOf } from './mergeFormat';
 import { ScrollRow } from './ScrollRow';
+import { visibleInterval } from './visibleInterval';
+import { mineBus } from './mineBus';
 import { StarRow } from './StarRow';
 import { useLayer } from './layers';
 
@@ -31,6 +33,9 @@ interface Props {
   /** 모바일 메뉴에서 [검색]·[보관함]을 눌렀다: 그 탭으로 시트를 연다(모바일은 시트가 평소에는 숨어 있다) */
   openRequest?: { tab: Tab; key: number } | null;
 }
+
+/** 보관함 카드를 처음 만드는 개수와, 스크롤할 때 한 번에 더 만드는 개수 */
+const MINE_FIRST = 24, MINE_CHUNK = 20;
 
 /** 보관함 정렬 기준. 기본은 남은 시간이 많은 것부터(곧 사라질 키워드가 아래로). */
 type SortKey = 'recent' | 'text' | 'state' | 'trend' | 'remaining' | 'length';
@@ -69,6 +74,10 @@ function loadSort(): SortState {
   } catch { /* 기본값 */ }
   return DEFAULT_SORT;
 }
+
+/** 합성이 끝나기 전에 "합쳐지면 이런 키워드가 된다"를 흉내 낸 카드: 연속으로 눌러 둔 다음 카드와 합칠 수 있는지 미리 보는 데 쓴다(구성·글자 수·활성 여부만 맞으면 된다) */
+const partsOfMine = (k: MyKeyword): MyKeyword['parts'] => (k.merged && k.parts.length > 0 ? k.parts : [{ keywordId: k.keywordId, text: k.text, state: k.state, trendValue: k.trendValue }]);
+const combineMine = (a: MyKeyword, b: MyKeyword): MyKeyword => ({ ...a, merged: true, state: '활성', stars: a.stars + b.stars, parts: [...partsOfMine(a), ...partsOfMine(b)] });
 
 const samePart = (a: MyKeyword['parts'][number], b: MyKeyword['parts'][number]) => a.keywordId === b.keywordId && a.trendValue === b.trendValue && a.state === b.state && a.text === b.text;
 const sameMine = (a: MyKeyword, b: MyKeyword) => a.keywordId === b.keywordId && a.text === b.text && a.state === b.state && a.trendValue === b.trendValue
@@ -156,7 +165,7 @@ function ResizeHandle({ sideRef }: { sideRef: React.RefObject<HTMLElement | null
               onKeyDown={onKey} onDoubleClick={reset} />;
 }
 
-export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeyword, onSharePlayer, searchRequest, openRequest, onHide }: Props) {
+function SidePanelImpl({ onPlused, onMerged, onError, refreshKey, onOpenKeyword, onSharePlayer, searchRequest, openRequest, onHide }: Props) {
   const layer = useLayer('side');
   const [tab, setTab] = useState<Tab>('search');
   const [q, setQ] = useState('');
@@ -218,28 +227,85 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
   };
 
   const endMerge = useCallback(() => { setMergeFrom(null); setBlocked(null); }, []);
+  /**
+   * 합성을 진행한다. chain이면([🔗]로 시작한 연속 합성) 결과가 다음 출발 카드가 되어 합성 모드가 이어지고, 진행 중에 눌러 둔 다음 카드들(mergeQueue)을
+   * 결과가 나오는 대로 차례로 합친다(빠르게 연달아 눌러도 클릭이 버려지지 않는다). 서버가 막거나 실패하면 대기열을 비우고 모드를 끝낸다.
+   */
+  const mergeQueue = useRef<number[]>([]);
+  const chainHead = useRef<MyKeyword | null>(null); // 진행 중인 합성의 (예상) 결과: 다음 카드를 눌렀을 때 합칠 수 있는지 미리 보는 데 쓴다
+  const [queuedIds, setQueuedIds] = useState<number[]>([]);
+  const [pendingMerge, setPendingMerge] = useState<string | null>(null); // 합성 요청 중: 재료 카드는 바로 사라지고 이 자리표시 카드가 결과를 기다린다
+  const runMerge = useCallback(async (a: MyKeyword, b: MyKeyword, chain: boolean) => {
+    merging.current = true;
+    chainHead.current = combineMine(a, b);
+    let src = a;
+    let keepGoing = false;
+    try {
+      let tgt: MyKeyword | undefined = b;
+      while (tgt) {
+        // 재료 두 장은 요청을 보내는 순간 목록에서 뺀다(응답을 기다리는 동안 다시 눌러 "보관함에 없는 키워드" 오류가 나지 않게). 결과가 오면 합성 키워드가 들어온다
+        mineEdits.current++;
+        setMine((list) => list.filter((k) => k.keywordId !== src.keywordId && k.keywordId !== tgt!.keywordId));
+        setPendingMerge(`${partsOfMine(src).concat(partsOfMine(tgt)).map((p) => p.text).join(' + ')}`);
+        const r = await api.merge(src.keywordId, tgt.keywordId);
+        setPendingMerge(null);
+        handleMerged(r, src, tgt);
+        keepGoing = chain && !!r.keyword && !r.failed && r.keyword.state === '활성';
+        if (!keepGoing || !r.keyword) break;
+        src = r.keyword;
+        setMergeFrom(src.keywordId); // 모드의 출발 카드가 결과를 따라간다
+        const nextId = mergeQueue.current.shift();
+        setQueuedIds([...mergeQueue.current]);
+        tgt = nextId === undefined ? undefined : mineRef.current.find((k) => k.keywordId === nextId);
+        chainHead.current = tgt ? mergeQueue.current.reduce((h, id) => { const k = mineRef.current.find((x) => x.keywordId === id); return k ? combineMine(h, k) : h; }, combineMine(src, tgt)) : src;
+      }
+    } catch (e) {
+      keepGoing = false;
+      onError(e instanceof ApiFailure ? e.message : t('merge.failed'));
+      mineEdits.current++; // 서버 상태가 어떻게 됐는지 모르므로 처음부터 다시 읽어 맞춘다
+      void loadMine();
+    } finally {
+      setPendingMerge(null);
+      window.setTimeout(() => { void loadMine(); }, 1500); // 합성이 모두 끝난 뒤 서버 값으로 한 번 맞춘다
+      merging.current = false;
+      chainHead.current = null;
+      mergeQueue.current = [];
+      setQueuedIds([]);
+      if (!keepGoing || (activeStars.length > 0 && !activeStars.includes(src.stars))) endMerge();
+    }
+  }, [activeStars, endMerge, onError]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /** 두 카드를 확인 창 없이 바로 합친다. 합칠 수 없으면(서버 판정 포함) 이유를 알림으로 보여 준다 */
   const openPair = useCallback((aId: number, bId: number) => {
     const a = mineById.get(aId), b = mineById.get(bId);
     if (!a || !b || a === b || merging.current) return;
     const chain = mergeFrom !== null; // [🔗]로 시작했다면 결과를 다음 출발 카드로 이어 연속으로 합친다(끌어서 합치기는 한 번으로 끝)
-    endMerge();
     const why = localReason(a, b);
+    if (why) { onError(why); if (!chain) endMerge(); return; }
+    if (!chain) endMerge();
+    void runMerge(a, b, chain);
+  }, [mineById, mergeFrom, endMerge, localReason, onError, runMerge]);
+
+  /** 합성이 진행 중일 때 다음 카드를 눌렀다: 합칠 수 있으면 대기열에 넣어 결과가 나오는 대로 이어서 합친다 */
+  const enqueueMerge = useCallback((k: MyKeyword) => {
+    const head = chainHead.current;
+    if (!head) return;
+    if (mergeQueue.current.includes(k.keywordId)) return;
+    const why = localReason(head, k);
     if (why) { onError(why); return; }
-    merging.current = true;
-    api.merge(a.keywordId, b.keywordId)
-      .then((r) => { handleMerged(r, a, b); if (chain && r.keyword && r.keyword.state === '활성' && (activeStars.length === 0 || activeStars.includes(r.keyword.stars))) setMergeFrom(r.keyword.keywordId); })
-      .catch((e) => onError(e instanceof ApiFailure ? e.message : t('merge.failed')))
-      .finally(() => { merging.current = false; });
-  }, [mineById, mergeFrom, activeStars, endMerge, localReason, onError]); // eslint-disable-line react-hooks/exhaustive-deps
+    mergeQueue.current.push(k.keywordId);
+    chainHead.current = combineMine(head, k);
+    setQueuedIds([...mergeQueue.current]);
+  }, [localReason, onError]);
 
   // 합성 모드를 켜거나 끌기를 시작하면 합칠 수 없는 카드를 한꺼번에 받아 흐리게 보여 준다(글자 수 초과·금지 조합처럼 서버만 아는 이유 포함).
   // 응답 전에는 이미 아는 이유(💤·구성 겹침)만 보이고, 실패하면 확정 때 이유를 알려 준다
   useEffect(() => {
-    if (source == null) return;
+    if (source == null || !mineRef.current.some((k) => k.keywordId === source)) return; // 합성 중이라 이미 목록에서 빠진 출발 카드는 묻지 않는다
     let alive = true;
-    api.mergeBlocked(source).then((reasons) => { if (alive) setBlocked({ from: source, reasons }); }).catch(() => { /* 확정 때 알려 준다 */ });
-    return () => { alive = false; };
+    // 연속 합성으로 출발 카드가 잇따라 바뀔 때 매번 묻지 않도록 0.3초 기다렸다가 마지막 것만 묻는다
+    const id = window.setTimeout(() => { api.mergeBlocked(source).then((reasons) => { if (alive) setBlocked({ from: source, reasons }); }).catch(() => { /* 확정 때 알려 준다 */ }); }, 300);
+    return () => { alive = false; window.clearTimeout(id); };
   }, [source]);
 
   // 합성 모드: Esc나 보관함 카드 밖을 누르면 끝낸다
@@ -300,9 +366,9 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
     if (r.failed || !r.keyword) { void loadMine(); return; } // 실패: 사라진 재료를 반영하려고 보관함을 새로 읽는다
     const kw = r.keyword;
     {
+      mineEdits.current++;
       setMine((list) => [...list.filter((k) => k.keywordId !== a?.keywordId && k.keywordId !== b?.keywordId && k.keywordId !== kw.keywordId), kw]);
-      setFresh({ id: kw.keywordId, bonus: r.bonus });
-      void loadMine();
+      setFresh({ id: kw.keywordId, bonus: r.bonus }); // 목록은 위에서 직접 고쳤으므로 보관함 전체를 다시 읽지 않는다(1분마다 맞춘다)
       timers.current.push(window.setTimeout(() => setFresh((f) => (f?.id === kw.keywordId ? null : f)), 550));
     }
   }
@@ -315,7 +381,12 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
   }, [starFilter]);
 
   /** 서버 보관함을 읽는다. 내용이 달라지지 않은 카드는 이전 객체를 그대로 써서(memo 카드가 다시 그려지지 않게) 키워드가 많아도 가볍다 */
-  async function loadMine() { try { const next = await api.myKeywords(); setMine((prev) => reconcileMine(prev, next)); } catch { /* 다음에 다시 */ } }
+  // 읽는 동안 화면이 목록을 직접 고쳤다면(합성으로 재료가 사라지는 등) 그 전에 요청한 응답은 낡은 것이라 버린다(사라진 카드가 되살아나 "보관함에 없는 키워드" 오류를 부르지 않게)
+  const mineEdits = useRef(0);
+  async function loadMine() {
+    const v = mineEdits.current;
+    try { const next = await api.myKeywords(); if (v === mineEdits.current) setMine((prev) => reconcileMine(prev, next)); } catch { /* 다음에 다시 */ }
+  }
 
   useEffect(() => {
     if (!openRequest) return;
@@ -350,15 +421,43 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
   }, [searchRequest]);
 
   // 보관함 개수를 탭 글자 옆에 늘 보이려고, 어느 탭이든 불러온다(처음·바뀔 때마다, 그리고 1분마다: 24시간이 지나 사라지는 키워드가 있다)
+  // 구슬 결과가 알려 준 변화(새로 얻음·만료 갱신)는 목록만 직접 고친다. 목록에 없는 카드의 갱신(합성 키워드로 가진 경우 등)은 어긋날 수 있어 모아서 한 번 다시 읽는다
+  const mineRef = useRef<MyKeyword[]>([]);
+  mineRef.current = mine;
+  const reloadTimer = useRef(0);
+  useEffect(() => mineBus.subscribe((events) => {
+    const nowIso = new Date().toISOString();
+    const known = new Set(mineRef.current.map((k) => k.keywordId));
+    let unknownRenew = false;
+    for (const e of events) { if (e.kind === 'gain') known.add(e.keywordId); else if (!known.has(e.keywordId)) unknownRenew = true; }
+    // 모인 변화를 한 번에 목록에 적용한다(정렬·필터도 한 번만 다시 계산된다)
+    setMine((list) => {
+      let next = list;
+      for (const e of events) {
+        const i = next.findIndex((k) => k.keywordId === e.keywordId);
+        if (e.kind === 'gain' && i < 0) {
+          next = [...next, { keywordId: e.keywordId, text: e.text, state: e.state, trendValue: e.trendValue, plusedAt: nowIso, expiresAt: e.expiresAt, merged: false, stars: 1, parts: [] }];
+        } else if (i >= 0 && !next[i].merged) {
+          next = next.map((k, j) => (j === i ? { ...k, plusedAt: nowIso, expiresAt: e.expiresAt } : k));
+        }
+      }
+      return next;
+    });
+    if (unknownRenew) { // 목록에 없는데 갱신만 왔다: 합성 키워드 안의 원본일 수 있다
+      window.clearTimeout(reloadTimer.current);
+      reloadTimer.current = window.setTimeout(() => { void loadMine(); }, 700);
+    }
+  }), []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // 처음에는 바로 읽고, 그 뒤 refreshKey가 바뀔 때(구슬·키워드 변화가 잇따를 때)는 0.7초 모아 한 번만 읽는다. 키워드가 수백 개면 한 번 읽는 것도 무겁다
   const loadedOnce = useRef(false);
   useEffect(() => {
     const t = window.setTimeout(loadMine, loadedOnce.current ? 700 : 0);
     loadedOnce.current = true;
-    const id = window.setInterval(loadMine, 60_000);
-    return () => { window.clearTimeout(t); window.clearInterval(id); };
+    const stop = visibleInterval(loadMine, 60_000);
+    return () => { window.clearTimeout(t); stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, refreshKey]);
+  }, [refreshKey]); // 탭을 오갈 때는 다시 읽지 않는다(보관함 개수는 늘 읽어 두고 있다)
 
   async function search(e: FormEvent) {
     e.preventDefault();
@@ -393,6 +492,27 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
     }
   }
 
+  // 검색·보관함 탭은 한 번 열면 계속 붙여 두고 숨기기만 한다: 탭을 오갈 때마다 카드 수백 개를 지웠다 다시 만들면 그때마다 렉이 걸린다
+  const visited = useRef({ search: true });
+  if (tab === 'search') visited.current.search = true;
+  // 보관함은 접속 직후 한가한 때(1.5초 뒤)에 보이지 않게 첫 묶음만 미리 만들어 두고, 그 전에 열면 바로 만든다
+  const [mineMounted, setMineMounted] = useState(false);
+  useEffect(() => { if (tab === 'mine') setMineMounted(true); }, [tab]);
+  useEffect(() => { const id = window.setTimeout(() => setMineMounted(true), 1500); return () => window.clearTimeout(id); }, []);
+  // 카드는 한꺼번에 수백 개를 만들면 화면이 멈추므로 처음 24개만 만들고, 목록 맨 아래가 보일 만큼 스크롤하면 20개씩 더 만든다(한 번 만든 카드는 그대로 둔다)
+  const [shown, setShown] = useState(MINE_FIRST);
+  // 정렬·필터를 바꾸면 목록이 달라지므로 처음 개수부터 다시 보여 준다(앞에서 많이 불러왔어도 바뀐 목록을 한꺼번에 그리지 않는다)
+  useEffect(() => { setShown(MINE_FIRST); }, [sort, activeStars]);
+  const moreRef = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    const el = moreRef.current;
+    if (!el || shown >= sortedMine.length) return;
+    // 숨겨진 탭에서는 보이지 않아 불리지 않는다. 더 만든 뒤에도 아직 보이면 새 관찰자가 바로 다시 불러 화면이 찰 때까지 이어진다
+    const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) setShown((n) => Math.min(n + MINE_CHUNK, sortedMine.length)); }, { rootMargin: '300px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [shown, sortedMine.length, mineMounted, tab]);
+
   // 카드(memo)에 넘기는 핸들러는 늘 같은 함수여야 카드가 다시 그려지지 않는다. 최신 상태는 ref를 거쳐 읽는다
   const live = useRef({
     open: (_k: MyKeyword) => {}, link: (_k: MyKeyword) => {}, pick: (_k: MyKeyword) => {}, linkDown: (_e: ReactPointerEvent, _k: MyKeyword) => {}, dragStart: (_e: ReactPointerEvent, _k: MyKeyword) => {},
@@ -400,7 +520,11 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
   live.current = {
     open: (k) => { if (!suppressClick.current) onOpenKeyword(k.keywordId, k.merged); },
     // 합성 모드에서 카드를 눌렀다: 출발 카드면 모드 끝, 로컬에서 불가가 확실하면 무시, 그 밖에는 바로 합친다(서버가 이유를 알려 준다)
-    pick: (k) => { if (mergeFrom === k.keywordId) endMerge(); else if (mergeFrom !== null && !localReason(mineById.get(mergeFrom)!, k)) openPair(mergeFrom, k.keywordId); },
+    pick: (k) => {
+      if (mergeFrom === null) return;
+      if (merging.current) { enqueueMerge(k); return; } // 합성이 진행 중이면 다음 카드를 대기열에 넣는다(클릭이 버려지지 않는다)
+      if (mergeFrom === k.keywordId) endMerge(); else if (!localReason(mineById.get(mergeFrom)!, k)) openPair(mergeFrom, k.keywordId);
+    },
     link: (k) => { if (suppressClick.current) return; if (mergeFrom === null) setMergeFrom(k.keywordId); else live.current.pick(k); },
     linkDown: (e, k) => startDrag(e, k, true),
     dragStart: (e, k) => startDrag(e, k),
@@ -424,8 +548,8 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
                 aria-label={t('side.collapsePanel')} title={t('side.collapsePanel')}>✕</button>
       </nav>
 
-      {tab === 'search' && (
-        <div className="tab-body">
+      {visited.current.search && (
+        <div className="tab-body" style={tab === 'search' ? undefined : { display: 'none' }}>
           <form onSubmit={search} className="search-row">
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('side.placeholder')} maxLength={20}
                    aria-label={t('side.searchAria')} autoComplete="off" />
@@ -455,8 +579,8 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
 
       {tab === 'players' && <PlayerSearch onOpenKeyword={onOpenKeyword} onShare={onSharePlayer} />}
 
-      {tab === 'mine' && (
-        <div className="tab-body">
+      {mineMounted && (
+        <div className="tab-body" style={tab === 'mine' ? undefined : { display: 'none' }}>
           {mine.length === 0 ? <p className="muted">{t('side.noneYet')}</p> : (<>
             <div className="sort-bar">
               {/* 기준을 누르면 그 기준으로, 이미 고른 기준을 다시 누르면 방향을 바꾼다 */}
@@ -492,7 +616,12 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
               )}
             </div>
             <ul className={source != null ? 'list merge-active' : 'list'}>
-              {sortedMine.map((k) => {
+              {pendingMerge !== null && (
+                <li className="mine-item mine-card merge-source mine-pending" role="status" aria-live="polite">
+                  <div className="mine-pending-body"><span className="mine-pending-spin" aria-hidden="true" /><strong title={pendingMerge}>{pendingMerge}</strong><span className="muted small">{t('merge.pending')}</span></div>
+                </li>
+              )}
+              {sortedMine.slice(0, shown).map((k) => {
                 const id = k.keywordId;
                 const role = source == null ? null : id === source ? 'source' : reasonFor(id) ? 'bad' : 'ok';
                 return (
@@ -500,10 +629,11 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
                             failPct={role === 'ok' && fail && source != null && mineById.get(source) ? Math.min(fail.max, fail.per * (mineById.get(source)!.stars + k.stars)) : null}
                             over={drag?.over === id}
                             fresh={fresh?.id === id ? (fresh.bonus ? 'bonus' : 'yes') : null}
-                            mode={mergeFrom !== null} tick={tick}
+                            mode={mergeFrom !== null} tick={tick} queuedAt={queuedIds.indexOf(id) + 1 || null}
                             onOpen={cardOpen} onLink={cardLink} onLinkDown={cardLinkDown} onPick={cardPick} onDragStart={cardDragStart} />
                 );
               })}
+              {shown < sortedMine.length && <li ref={moreRef} className="muted small mine-loading" role="status">{t('side.loadingMore', { n: sortedMine.length - shown })}</li>}
             </ul>
             <p className="muted small merge-drag-hint">{t('merge.dragHint')}</p>
           </>)}
@@ -517,6 +647,9 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
 
 /** 점수(트렌드 값, 가진 사람이 많을수록 오른다)에 따른 카드 등급: 0 기본 · 1 주목(15~) · 2 인기(30~) · 3 대세(50~) · 4 전설(100~, 합성 키워드가 주로 닿는다). 점수에는 상한이 없다 */
 
+/** 상위(GameScreen)가 점수·핑 같은 것으로 자주 다시 그려져도, 받는 값이 그대로면 보관함 패널은 다시 그리지 않는다 */
+export const SidePanel = memo(SidePanelImpl);
+
 type Fx = 'yes' | 'bonus' | null;
 
 /**
@@ -527,8 +660,9 @@ type Fx = 'yes' | 'bonus' | null;
  * 합성 키워드(4.44)는 이름 앞에 ★이 붙는다(4성 이상은 ★4). 이름이 구성 원본을 띄어 쓴 것이라 구성을 따로 적지 않는다. 오른쪽 [🔗]는 합성 모드를 켠다.
  * role: 합성 모드·드래그 중의 역할(source 출발 · ok 합칠 수 있음 · bad 합칠 수 없음, reason에 이유).
  */
-const MineCard = memo(function MineCard({ k, mins, role, reason, failPct, over, fresh, mode, tick, onOpen, onLink, onLinkDown, onPick, onDragStart }: {
+const MineCard = memo(function MineCard({ k, mins, role, reason, failPct, over, fresh, mode, tick, queuedAt, onOpen, onLink, onLinkDown, onPick, onDragStart }: {
   k: MyKeyword; mins: number[]; role: 'source' | 'ok' | 'bad' | null; reason: string | null; failPct: number | null; over: boolean; fresh: Fx; mode: boolean;
+  queuedAt: number | null; // 합성 진행 중에 눌러 둔 순서(1부터). 없으면 null
   tick: number; // 30초마다 바뀌는 값: 남은 시간 게이지를 다시 계산하게 한다(memo가 이 값이 바뀔 때만 다시 그린다)
   onOpen(k: MyKeyword): void; onLink(k: MyKeyword): void; onLinkDown(e: ReactPointerEvent, k: MyKeyword): void; onPick(k: MyKeyword): void; onDragStart(e: ReactPointerEvent, k: MyKeyword): void;
 }) {
@@ -554,6 +688,7 @@ const MineCard = memo(function MineCard({ k, mins, role, reason, failPct, over, 
             : <span className="mine-stars"><span className="badge">{STATE_BADGE[k.state] ?? k.state}</span></span>} {/* 비활성은 별 자리에 상태 태그 */}
           <span className="mine-tags">
             {/* 글자 수(합성 한도 20자 대비): 숫자만 있는 작은 태그. 점수 태그의 왼쪽에 둔다 */}
+            {queuedAt !== null && <span className="mine-queued" title={t('merge.queuedTitle')}>{queuedAt}</span>}
             {failPct != null && <span className="mine-fail" title={t('merge.failChanceTitle')}>{t('merge.failChance', { p: Math.round(failPct) })}</span>}
             <span className="mine-len" title={t('side.lengthTitle', { n: len })} aria-label={t('side.lengthTitle', { n: len })}>{len}</span>
             <span className="mine-score" title={tier > 0 ? t(`side.tier${tier}`) : undefined}>{t('side.points', { n: fmtNumber(k.trendValue) })}</span>

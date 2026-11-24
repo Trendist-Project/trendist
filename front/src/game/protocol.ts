@@ -125,8 +125,8 @@ export type SkillFx =
 /** 몬스터(보스, 4.35) 메시지. 상태는 5Hz, 나머지는 사건이 있을 때 온다 */
 export type MonsterMessage =
   | ({ type: 'monster' } & import('./monsterFx').MonsterState)
-  | { type: 'monsterAlert'; name: string; en: string; seconds: number } // 곧 나온다(나오기 전 예고)
-  | { type: 'monsterSpawn'; id: number; name: string; en: string; max: number; durationMs: number }
+  | { type: 'monsterAlert'; name: string; en: string; img?: string; seconds: number } // 곧 나온다(나오기 전 예고)
+  | { type: 'monsterSpawn'; id: number; name: string; en: string; img?: string; max: number; durationMs: number }
   | ({ type: 'monsterFx' } & import('./monsterFx').MonsterFxMsg)
   | ({ type: 'monsterHit' } & import('./monsterFx').MonsterHitMsg) // 누가 보스를 쳐서 입힌 피해
   | { type: 'monsterEnd'; id: number; name: string; en: string; result: 'KILLED' | 'TIMEOUT' | 'REMOVED'; max: number; hp: number; top: { playerId: number; nickname: string; damage: number; hits: number }[] }
@@ -198,4 +198,7 @@ export interface OrbResult {
   trendValue?: number;
   holderCount?: number;
   gained?: number;
+  /** GAINED·RENEWED일 때 그 키워드의 번호와 새 만료 시각: 화면이 보관함 목록을 직접 고치는 데 쓴다 */
+  keywordId?: number;
+  expiresAt?: string;
 }

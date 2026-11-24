@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
+import { visibleInterval } from './visibleInterval';
 import type { EmergencyNotice } from '../api/types';
 import { getLang } from '../country';
 import { t } from '../i18n';
@@ -68,10 +69,8 @@ export function useEmergency() {
     let alive = true;
     const load = () => api.emergency().then((r) => { if (alive) apply(r.notice); }).catch(() => { /* 못 읽으면 지금 값을 그대로 둔다 */ });
     load();
-    const poll = window.setInterval(load, POLL_MS);
-    const onVisible = () => { if (document.visibilityState === 'visible') load(); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => { alive = false; window.clearInterval(poll); window.clearTimeout(timer.current); document.removeEventListener('visibilitychange', onVisible); };
+    const stopPoll = visibleInterval(load, POLL_MS); // 탭이 다시 보이면 바로 한 번 읽는다
+    return () => { alive = false; stopPoll(); window.clearTimeout(timer.current); };
   }, [apply]);
 
   return { notice, apply };

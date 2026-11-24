@@ -33,6 +33,8 @@ export default {
   failed: 'Could not merge',
   done: '{stars} {name} merged! +{gained} pts',
   doneBonus: '✨ Bonus! {name} added',
+  pending: 'Merging…',
+  queuedTitle: 'Queued: merges right after the current one finishes',
   failedLost: 'Merge failed… {name} was lost (-{pts} pts)',
   failChance: 'Fail {p}%',
   failChanceTitle: 'On failure, the lower-scored of the two materials is lost',

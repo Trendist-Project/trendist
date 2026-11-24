@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
+import { visibleInterval } from './visibleInterval';
 import type { RankingEntry } from '../api/types';
 import { fmtNumber, t } from '../i18n';
 
-const REFRESH_MS = 3000; // 접속자 점수는 방 메모리 값이라 자주 바뀐다. 켜져 있는 동안만 다시 읽는다
+const REFRESH_MS = 5_000; // 접속자 점수는 방 메모리 값이라 자주 바뀐다. 켜져 있는 동안만 다시 읽는다
 const TOP = 10;          // 서버가 주는 순위 수(최대)
 const MAX_LINES = 11;    // 저장하는 줄 수의 상한(TOP 10 + 내 순위 한 줄)
 const MIN_LINES = 3;     // 최소 3줄(내 순위 포함): 내가 1등이 아니어도 내 순위가 항상 보이게
@@ -36,8 +37,8 @@ export function Leaderboard({ myPlayerId }: Props) {
       } catch { /* 다음에 다시 */ }
     };
     load();
-    const timer = window.setInterval(load, REFRESH_MS);
-    return () => { alive = false; clearInterval(timer); };
+    const stop = visibleInterval(load, REFRESH_MS);
+    return () => { alive = false; stop(); };
   }, []);
 
   const save = (n: number) => { try { localStorage.setItem(LINES_KEY, String(n)); } catch { /* 저장 못 해도 된다 */ } };

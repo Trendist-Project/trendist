@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { wsStats } from '../game/perfStats';
+import { usePing } from './pingStore';
 
 /**
  * 성능 점검 표시(개발용). 주소 끝에 ?perf=1을 붙이면(또는 localStorage trendist.perfHud=1) 화면 왼쪽 위에 1초마다 갱신되는 숫자가 뜬다.
@@ -13,7 +14,8 @@ export const perfHudEnabled = () => {
   try { return new URLSearchParams(location.search).get('perf') === '1' || localStorage.getItem('trendist.perfHud') === '1'; } catch { return false; }
 };
 
-export function PerfHud({ pingMs }: { pingMs: number | null }) {
+export function PerfHud() {
+  const pingMs = usePing();
   const [line, setLine] = useState('측정 중…');
   useEffect(() => {
     let frames = 0, maxFrame = 0, slowFrames = 0, last = performance.now(), raf = 0;

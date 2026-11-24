@@ -1,3 +1,4 @@
+import { mineBus, type MineEvent } from './mineBus';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import type { EmergencyNotice, PlayerSummary } from '../api/types';
 import type { Arena } from '../game/Arena';
@@ -42,7 +43,7 @@ export interface GameMessageContext {
   myEntityRef: MutableRefObject<number>;
   showReveal: (r: RevealResult) => void;
   showTitleAlert: (titleId: number, name: string, description: string) => void;
-  showToast: (msg: string) => void;
+  showToast: (msg: string, img?: string) => void;
   flashSkill: (id: string) => void; // 스킬을 쓰지 못했을 때 그 스킬 칸을 깜빡인다
   applyEmergency: (n: EmergencyNotice | null) => void;
   setPlayer: Set<PlayerSummary>;
@@ -79,8 +80,58 @@ let feedId = 0;
 const SKILL_LOSS: LossCause[] = ['poison', 'quake', 'fireball', 'slow', 'darkness', 'silence', 'stun', 'root', 'confuse', 'zone', 'burst'];
 const lostTitle = (cause: LossCause): string | undefined => SKILL_LOSS.includes(cause) ? t('gamescreen.skillLostTitle', { skill: t(`skills.${cause}_name`) }) : undefined;
 
+type ScoreMsg = Extract<ServerMessage, { type: 'score' }>;
+let scoreCooling = false;
+let scorePending: ScoreMsg | null = null;
+function pushScore(m: ScoreMsg, setPlayer: GameMessageContext['setPlayer']) {
+  const apply = (s: ScoreMsg) => setPlayer((p) => ({ ...p, currentScore: s.score, exp: s.exp, nextLevelExp: s.nextExp, level: s.level, holdCount: s.holdCount }));
+  if (scoreCooling) { scorePending = m; return; }
+  apply(m);
+  scoreCooling = true;
+  window.setTimeout(() => { scoreCooling = false; if (scorePending) { const last = scorePending; scorePending = null; apply(last); } }, 150);
+}
+
+/**
+ * 구슬 결과 묶음 보여 주기: 한꺼번에 여러 개를 먹으면 결과가 잇따라 오는데, 하나씩 카드·떠오르는 글자·목록 갱신을 하면 브라우저가 그만큼 일을 한다.
+ * 맨 처음 결과는 바로 처리하고, 그 뒤 ORB_BATCH_MS(0.1초) 안에 온 것은 모아서 끝에 한 번에 처리한다: 결과 카드는 마지막 키워드 하나만, 떠오르는 점수는 합계 하나, 소리는 한 번, 보관함 목록은 한 번에 고친다.
+ */
+const ORB_BATCH_MS = 100;
+type OrbMsg = Extract<ServerMessage, { type: 'orbResult' }>;
+let orbBuf: OrbMsg[] = [];
+let orbTimer = 0;
+function pushOrb(m: OrbMsg, c: GameMessageContext) {
+  if (orbTimer) { orbBuf.push(m); return; } // 모으는 중: 마지막에 한꺼번에
+  flushOrbs([m], c); // 맨 처음 것은 기다리지 않고 바로 보여 준다(구슬 하나만 먹으면 지연이 없다)
+  orbTimer = window.setTimeout(() => { orbTimer = 0; if (orbBuf.length > 0) { const batch = orbBuf; orbBuf = []; flushOrbs(batch, c); } }, ORB_BATCH_MS);
+}
+
+function flushOrbs(batch: OrbMsg[], c: GameMessageContext) {
+  if (batch.length === 0) return;
+  // 구슬이 원 안으로 빨려 들어간 뒤에 결과 카드를 띄운다. 키워드가 걸린 마지막 결과를 보여 주고, 없으면(꽝·없음) 마지막 것
+  const shown = [...batch].reverse().find((r) => r.status === 'GAINED' || r.status === 'RENEWED' || r.status === 'LOST') ?? batch[batch.length - 1];
+  playSfx('orb');
+  const key = performance.now();
+  const kind = shown.status === 'GAINED' || shown.status === 'RENEWED' ? 'GAIN' : shown.status === 'LOST' ? 'LOSE' : undefined;
+  window.setTimeout(() => c.setOrbReveal({ result: { ...shown, kind }, key }), 250);
+  window.setTimeout(() => c.setOrbReveal((cur) => (cur?.key === key ? null : cur)), 250 + ORB_REVEAL_MS);
+  // 떠오르는 점수는 얻은 점수와 잃은 점수의 합계 하나
+  let net = 0;
+  for (const r of batch) { if (r.status === 'GAINED') net += r.gained ?? 0; else if (r.status === 'LOST') net -= r.gained ?? 0; }
+  if (net > 0) c.arena.floatText(`+${net}`); else if (net < 0) c.arena.floatText(`${net}`);
+  // 보관함 목록: 새로 얻었거나 만료만 갱신한 것은 서버가 알려 준 키워드 번호로 목록을 직접 고치고(전체를 다시 읽지 않는다), 잃은 것은 어떤 카드가 바뀌었는지 몰라 한 번 다시 읽는다
+  const events: MineEvent[] = [];
+  let reload = false;
+  for (const r of batch) {
+    if ((r.status === 'GAINED' || r.status === 'RENEWED') && r.keywordId != null && r.text && r.expiresAt) {
+      events.push({ kind: r.status === 'GAINED' ? 'gain' : 'renew', keywordId: r.keywordId, text: r.text, state: r.state as never, trendValue: Number(r.trendValue ?? 0), expiresAt: String(r.expiresAt) });
+    } else if (r.status === 'GAINED' || r.status === 'RENEWED' || r.status === 'LOST') reload = true;
+  }
+  if (events.length > 0) mineBus.emit(events);
+  if (reload) c.setRefreshKey((k) => k + 1);
+}
+
 export function handleGameMessage(m: ServerMessage, c: GameMessageContext) {
-  const { arena, conn, sess, skillLock, toLine, hookedUntilRef, myEntityRef, showReveal, showTitleAlert, showToast, flashSkill, applyEmergency, setPlayer, setOnline, setBots, setMonsterNote, setMyBossDmg, setKicked, setMyHp, setSkillOn, setDead, setMyCombo, setHit, setDash, setSkillCd, setSkillActive, setHookedUntil, setSlots, setRefreshKey, setOrbReveal, setPingMs, setChatLines, setFeed, tutorialEvent } = c;
+  const { arena, conn, sess, skillLock, toLine, hookedUntilRef, myEntityRef, showReveal, showTitleAlert, showToast, flashSkill, applyEmergency, setPlayer, setOnline, setBots, setMonsterNote, setMyBossDmg, setKicked, setMyHp, setSkillOn, setDead, setMyCombo, setHit, setDash, setSkillCd, setSkillActive, setHookedUntil, setSlots, setRefreshKey, setPingMs, setChatLines, setFeed, tutorialEvent } = c;
   switch (m.type) {
     case 'welcome':
       setDead(null); arena.setDead(false); // 처음 들어왔거나 리스폰했다
@@ -96,11 +147,11 @@ export function handleGameMessage(m: ServerMessage, c: GameMessageContext) {
       break;
     case 'monster': arena.setMonster(m); break; // 보스 상태(5Hz, 4.35)
     case 'monsterFx': arena.monsterFx(m); break;
-    case 'monsterAlert': playSfx('boss'); showToast(t('monster.alert', { name: getLang() === 'en' && m.en ? m.en : m.name, sec: Math.max(1, Math.round(m.seconds)) })); break;
+    case 'monsterAlert': playSfx('boss'); showToast(t('monster.alert', { name: getLang() === 'en' && m.en ? m.en : m.name, sec: Math.max(1, Math.round(m.seconds)) }), m.img ?? ''); break;
     case 'monsterSpawn':
       playSfx('boss');
       setMyBossDmg({ dmg: 0, hits: 0 }); setMonsterNote(null);
-      showToast(t('monster.spawn', { name: getLang() === 'en' && m.en ? m.en : m.name, min: Math.max(1, Math.round(m.durationMs / 60000)) }));
+      showToast(t('monster.spawn', { name: getLang() === 'en' && m.en ? m.en : m.name, min: Math.max(1, Math.round(m.durationMs / 60000)) }), m.img ?? '');
       break;
     case 'monsterHit':
       arena.monsterHit(m);
@@ -122,8 +173,8 @@ export function handleGameMessage(m: ServerMessage, c: GameMessageContext) {
     case 'emergency': applyEmergency(m.notice); break;
     case 'titleGranted': showTitleAlert(m.titleId, m.name, m.description); break;
     case 'roster': arena.setRoster(m.players, m.flameAt); setOnline(m.players.filter((p) => !p.bot).length); setBots(m.players.filter((p) => p.bot).length); break;
-    case 'score':
-      setPlayer((p) => ({ ...p, currentScore: m.score, exp: m.exp, nextLevelExp: m.nextExp, level: m.level, holdCount: m.holdCount }));
+    case 'score': // 점수 메시지가 잇따라 와도 0.15초에 한 번만 화면에 반영한다(맨 처음 것은 바로, 그 사이 온 것은 마지막 값만)
+      pushScore(m, setPlayer);
       break;
     case 'pong': {
       const ms = performance.now() - m.t;
@@ -135,18 +186,9 @@ export function handleGameMessage(m: ServerMessage, c: GameMessageContext) {
     case 'orbSpawn': arena.addOrb(m.id, m.x, m.y, m.prize); break;
     case 'orbEaten': arena.eatOrb(m.id, m.e); break;
     case 'safeZones': arena.setSafeZones(m.center, m.zones); break;
-    case 'orbResult': {
-      // 구슬이 원 안으로 빨려 들어간 뒤에 결과 카드를 띄운다
-      playSfx('orb');
-      const key = performance.now();
-      const kind = m.status === 'GAINED' || m.status === 'RENEWED' ? 'GAIN' : m.status === 'LOST' ? 'LOSE' : undefined;
-      window.setTimeout(() => setOrbReveal({ result: { ...m, kind }, key }), 250);
-      window.setTimeout(() => setOrbReveal((cur) => (cur?.key === key ? null : cur)), 250 + ORB_REVEAL_MS);
-      if (m.status === 'GAINED') arena.floatText(`+${m.gained ?? 0}`);
-      if (m.status === 'LOST' && m.gained) arena.floatText(`-${m.gained}`);
-      if (m.status === 'GAINED' || m.status === 'RENEWED' || m.status === 'LOST') setRefreshKey((k) => k + 1); // 보관함 목록 새로고침(새 키워드, 또는 바뀐 만료 시각)
+    case 'orbResult':
+      pushOrb(m, c); // 짧은 시간에 잇따라 온 구슬 결과는 모아서 한 번에 보여 준다(아래 flushOrbs)
       break;
-    }
     case 'chat':
       arena.showBubble(m.e, m.text);
       setChatLines((lines) => [...lines, toLine(m)].slice(-CHAT_KEEP));

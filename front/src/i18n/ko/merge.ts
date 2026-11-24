@@ -34,6 +34,8 @@ export default {
   done: '{stars} {name} 합성! +{gained}점',
   doneBonus: '✨ 보너스! {name} 추가',
   detailTitle: '합성 키워드',
+  pending: '합성 중…',
+  queuedTitle: '합성 대기 중: 앞의 합성이 끝나면 이어서 합쳐져요',
   failedLost: '합성 실패… {name}이(가) 사라졌어요 (-{pts}점)',
   failChance: '실패 {p}%',
   failChanceTitle: '합성에 실패하면 두 재료 중 점수가 낮은 쪽이 사라져요',

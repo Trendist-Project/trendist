@@ -1,6 +1,6 @@
 export default {
-  alert: '🐢 {name} appears in {sec}s! Gather outside the safe zone',
-  spawn: '🐢 {name} has appeared! Defeat it within {min} min',
+  alert: '{name} appears in {sec}s! Gather outside the safe zone',
+  spawn: '{name} has appeared! Defeat it within {min} min',
   hudTime: 'Time left',
   hudHp: 'HP',
   hudMineLabel: 'My damage',

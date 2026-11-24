@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiFailure } from '../api/client';
+import { visibleInterval } from './visibleInterval';
 import type { Activity, ActivityRange, KeywordCard, MergedDetail, PlayerSummary } from '../api/types';
 import { ActivityChart } from './ActivityChart';
 import { GeminiIcon } from './GeminiIcon';
@@ -59,8 +60,7 @@ export function MergedKeywordModal({ keywordId, onClose, onPlused, onError, onSh
   // 이번 시간은 집계 중이라 창이 열려 있는 동안 1분마다 다시 읽는다
   useEffect(() => {
     loadActivity();
-    const id = window.setInterval(loadActivity, 60_000);
-    return () => clearInterval(id);
+    return visibleInterval(loadActivity, 60_000);
   }, [loadActivity]);
 
   const holdersSum = detail ? detail.parts.reduce((n, p) => n + p.holderCount, 0) : 0;

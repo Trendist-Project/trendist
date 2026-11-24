@@ -30,7 +30,7 @@ import { SkillWindow } from './SkillWindow';
 import { BottomBar } from './BottomBar';
 import { WheelModal } from './WheelModal';
 import { successToast } from './toast';
-import { loadSideHidden, saveSideHidden, loadSideWidth, loadSideHeight, loadMinimapPref, saveMinimapPref, loadLeaderboardPref, saveLeaderboardPref, loadChatView, saveChatView, loadHelpPref, saveHelpPref, pingQuality, saveSideSize, applySideVars, type ChatView } from './gamePrefs';
+import { loadSideHidden, saveSideHidden, loadSideWidth, loadSideHeight, loadMinimapPref, saveMinimapPref, loadLeaderboardPref, saveLeaderboardPref, loadChatView, saveChatView, loadHelpPref, saveHelpPref, saveSideSize, applySideVars, type ChatView } from './gamePrefs';
 import { startUiSync } from './uiSync';
 import { LayersProvider, useLayer } from './layers';
 import { useMultiTouchClicks } from './touchPress';
@@ -42,6 +42,9 @@ import { MonsterHud, MonsterNoteCard, type MonsterNote } from './MonsterHud';
 import { SkillIcon } from './SkillIcon';
 import { KillFeed, type FeedLine } from './KillFeed';
 import { PerfHud, perfHudEnabled } from './PerfHud';
+import { PingBadge } from './PingBadge';
+import { setPing } from './pingStore';
+import { visibleInterval } from './visibleInterval';
 import { Tutorial, tutorialDone, markTutorialDone, type TutorialApi } from './Tutorial';
 import { playSfx, soundAudible, soundState, subscribeSound, unlockAudio } from '../game/sound';
 import { SoundPanel } from './SoundPanel';
@@ -73,7 +76,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   const { notice: emergency, apply: applyEmergency } = useEmergency(); // 긴급 안내(4.29): 맨 위 한 줄. 서버 알림은 apply로 바로 반영
   const [bots, setBots] = useState(0);
   const [status, setStatus] = useState<'connecting' | 'open' | 'closed'>('connecting');
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ text: string; img?: string } | null>(null); // img: 알림 앞에 붙일 보스 그림(빈 문자열이면 기본 아이콘)
   const [kicked, setKicked] = useState<string | null>(null); // 관리자가 내보냄(13.10)
   const [myHp, setMyHp] = useState<{ pct: number; flash: { kind: 'hit' | 'heal'; key: number } | null; barrier?: number }>({ pct: -1, flash: null }); // 내 체력(4.36). -1은 서버에서 아직 못 받은 상태: 체력바를 숨겨 100에서 줄어드는 모션을 막는다
   const [dead, setDead] = useState<{ by: string; waiting: boolean; hp?: boolean } | null>(null); // 죽음(4.31): 흑백 화면에 머물며 리스폰을 기다린다
@@ -140,6 +143,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   const [showMinimap, setShowMinimap] = useState(loadMinimapPref);
   const [sideHidden, setSideHidden] = useState(loadSideHidden);
   const setSide = useCallback((hidden: boolean) => { setSideHidden(hidden); saveSideHidden(hidden); }, []);
+  const hideSide = useCallback(() => setSide(true), [setSide]);
   const [showLeaderboard, setShowLeaderboard] = useState(loadLeaderboardPref);
   const [showHelp, setShowHelp] = useState(loadHelpPref);
   const [panel, setPanel] = useState<'notice' | 'guide' | 'profile' | 'skills' | 'wheel' | 'sound' | null>(null);
@@ -164,8 +168,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   // 정보 보기 모드(모바일): 켜져 있으면 다음 탭은 이동이 아니라 그 원의 정보를 연다
   const [sideRequest, setSideRequest] = useState<{ tab: 'search' | 'mine'; key: number } | null>(null); // 모바일 메뉴에서 시트를 여는 요청
   const [menuOpen, setMenuOpen] = useState(false); // 모바일 ☰ 메뉴
-  const [pingMs, setPingMs] = useState<number | null>(null); // 서버와의 왕복 시간(ms, 부드럽게). 연결이 없으면 null
-  useEffect(() => { if (status !== 'open') setPingMs(null); }, [status]); // 끊기면 옛 값을 버린다
+  useEffect(() => { if (status !== 'open') setPing(null); }, [status]); // 서버와의 왕복 시간(핑)은 pingStore에 둔다(화면 전체가 2초마다 다시 그려지지 않게). 끊기면 옛 값을 버린다
   // 전체 화면(안드로이드 크롬 등): 주소창을 가리고 화면을 넓힌다. 아이폰 사파리는 지원하지 않아 메뉴에 안 보인다(홈 화면에 추가하면 주소창 없이 열린다)
   const canFullscreen = canFullscreenSupported();
   const [isFullscreen, setIsFullscreen] = useState(() => typeof document !== 'undefined' && !!document.fullscreenElement);
@@ -204,8 +207,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   useEffect(() => { // 돌림판을 지금 돌릴 수 있으면 메뉴에 점을 띄운다(1분마다 다시 확인: 쿨타임 1시간이 지나면 다시 돌릴 수 있다)
     const load = () => api.wheelStatus().then((s) => setWheelReady(s.enabled && s.available)).catch(() => {});
     load();
-    const id = window.setInterval(load, 60_000);
-    return () => window.clearInterval(id);
+    return visibleInterval(load, 60_000);
   }, []);
   useEffect(() => {
     let first = true;
@@ -216,8 +218,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
       first = false;
     }).catch(() => { /* 다음에 다시 */ });
     load();
-    const t = window.setInterval(load, 5 * 60_000);
-    return () => clearInterval(t);
+    return visibleInterval(load, 5 * 60_000);
   }, []);
   // 관리자 계정이면 관리자 페이지(/admin/, 13절)로 가는 버튼을 보여 준다. 다른 사람에게는 버튼이 없다
   const [isAdmin, setIsAdmin] = useState(false);
@@ -251,9 +252,10 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     }
   }, [dismissTitleAlert]);
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    window.setTimeout(() => setToast((t) => (t === msg ? null : t)), 3500);
+  const showToast = useCallback((msg: string, img?: string) => {
+    const mine = { text: msg, img };
+    setToast(mine);
+    window.setTimeout(() => setToast((t) => (t === mine ? null : t)), 3500);
   }, []);
 
   useEffect(() => {
@@ -263,7 +265,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     // 아레나 배경 테마·날씨(4.38): 처음 한 번 받고 10분마다 다시 받는다(날씨·관리자 설정이 바뀌어도 반영). 못 받으면 원래 배경
     const loadTheme = () => { api.arenaTheme().then((c) => arena.setTheme(c)).catch(() => { /* 원래 배경 */ }); };
     loadTheme();
-    const themeTimer = window.setInterval(loadTheme, 10 * 60 * 1000);
+    const stopTheme = visibleInterval(loadTheme, 10 * 60 * 1000);
 
     // 서버 방에 들어간 뒤(welcome)부터 끊길 때까지만 ready. 메시지 처리(gameMessages)와 입력이 함께 쓴다
     const sess: GameSession = { ready: false, myEntity: -1, resyncDir: () => {} };
@@ -293,7 +295,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     const ctx: GameMessageContext = {
       arena, conn, sess, skillLock, toLine, hookedUntilRef, myEntityRef, showReveal, showTitleAlert, showToast, flashSkill, applyEmergency,
       setPlayer, setOnline, setBots, setMonsterNote, setMyBossDmg, setKicked, setMyHp, setSkillOn, setDead, setMyCombo, setHit, setDash, setSkillCd, setSkillActive,
-      setHookedUntil, setSlots, setRefreshKey, setOrbReveal, setPingMs, setChatLines, setFeed, tutorialEvent: (e) => tutorialApi.current?.event(e),
+      setHookedUntil, setSlots, setRefreshKey, setOrbReveal, setPingMs: setPing, setChatLines, setFeed, tutorialEvent: (e) => tutorialApi.current?.event(e),
     }; // 메시지는 연결이 열린 뒤에야 오므로 conn을 만든 다음에 묶어도 된다
     sendEmoteRef.current = (code: string) => { if (sess.ready) conn.send({ type: 'emote', code }); };
     // 대시(4.27): 쿨타임·움직이는 중인지는 서버가 보고, 시작하면 {type: 'dash'}로 알려 온다
@@ -324,7 +326,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     return () => {
       input.detach();
       clearInterval(pingTimer);
-      clearInterval(themeTimer);
+      stopTheme();
       window.removeEventListener('pagehide', bye);
       bye(); // 로그아웃 등으로 게임 화면을 나갈 때도
       conn.stop();
@@ -439,7 +441,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     <div className="game-shell">
       {emergency && <EmergencyBar text={emergencyText(emergency)} />}
     <div className={sideHidden ? 'game side-hidden' : 'game'}>
-      {perfHudEnabled() && <PerfHud pingMs={pingMs} />}
+      {perfHudEnabled() && <PerfHud />}
       {kicked && (
         <div className="modal-backdrop kicked-backdrop" role="alertdialog" aria-labelledby="kicked-title">
           <div className="modal kicked-box">
@@ -480,10 +482,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
             <span className="hud-long">{t('gamescreen.onlineLong', { online })}</span><span className="hud-short">👥 {online}</span>
             {bots > 0 && <span className="muted"><span className="hud-long">{t('gamescreen.botsLong', { bots })}</span><span className="hud-short"> · 🤖 {bots}</span></span>}
           </span>
-          {pingMs !== null && status === 'open' && (() => {
-            const q = pingQuality(pingMs);
-            return <span className={`hud-ping ping-${q}`} title={t(`gamescreen.ping_${q}`, { ms: pingMs })} aria-label={t(`gamescreen.ping_${q}`, { ms: pingMs })}><i aria-hidden="true" />{pingMs}ms</span>;
-          })()}
+          <PingBadge open={status === 'open'} />
           <span className="hud-me">{t('gamescreen.score', { n: fmtNumber(Number(player.currentScore)) })}</span>
           {status !== 'open' && <span className="warn">{status === 'connecting' ? t('gamescreen.connecting') : t('gamescreen.reconnecting')}</span>}
         </div>
@@ -648,10 +647,10 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
         <div className="notify-stack">
           {orbReveal && <OrbReveal key={orbReveal.key} result={orbReveal.result} />}
           {hit && <div key={hit.key} className="toast hit-toast" role="status">🎯 {hit.text}</div>}
-          {toast && <div className="toast" role="status">{toast}</div>}
+          {toast && <div className="toast" role="status">{toast.img !== undefined && (toast.img ? <img className="toast-img" src={`/monsters/${toast.img}.svg`} alt="" draggable={false} /> : <span aria-hidden="true">🐢 </span>)}{toast.text}</div>}
         </div>
       </div>
-      <SidePanel onPlused={onPlused} onMerged={onMerged} refreshKey={refreshKey} onError={showToast} onHide={() => setSide(true)}
+      <SidePanel onPlused={onPlused} onMerged={onMerged} refreshKey={refreshKey} onError={showToast} onHide={hideSide}
                  onOpenKeyword={setOpenKeyword} onSharePlayer={sharePlayer} searchRequest={searchRequest} openRequest={sideRequest} />
       {infoEntity !== null && (
         <PlayerInfoModal entityNo={infoEntity} bot={infoBot} look={infoLook} onClose={() => setInfoEntity(null)}

@@ -1,6 +1,6 @@
 export default {
-  alert: '🐢 {name}이(가) {sec}초 뒤에 나타나요! 세이프존 밖에서 모여 주세요',
-  spawn: '🐢 {name} 등장! {min}분 안에 쓰러뜨려요',
+  alert: '{name}이(가) {sec}초 뒤에 나타나요! 세이프존 밖에서 모여 주세요',
+  spawn: '{name} 등장! {min}분 안에 쓰러뜨려요',
   hudTime: '남은 시간',
   hudHp: '체력',
   hudMineLabel: '내 피해',
