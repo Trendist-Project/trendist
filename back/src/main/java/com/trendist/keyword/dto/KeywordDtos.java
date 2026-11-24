@@ -23,9 +23,9 @@ public final class KeywordDtos {
 
     /**
      * 합성 미리보기(4.44). ok=false면 reason에 이유(글자 수 초과·구성 겹침·비활성 등).
-     * score는 보너스 전 예상 점수(구성 점수 합 × 배율), bonusPercent는 +1성 보너스 확률(%), bonusPossible은 붙일 후보가 있는지.
+     * score는 보너스 전 예상 점수(구성 점수 합 × 별 개수), bonusPercent는 +1성 보너스 확률(%), bonusPossible은 붙일 후보가 있는지.
      */
-    public record MergePreview(boolean ok, String reason, String text, int stars, long partSum, double multiplier, long score,
+    public record MergePreview(boolean ok, String reason, String text, int stars, long partSum, int multiplier, long score,
                                int expireHours, int length, int maxLength, double bonusPercent, boolean bonusPossible,
                                List<MergedPart> parts) {}
 
@@ -35,7 +35,7 @@ public final class KeywordDtos {
     public record MergeRequest(@jakarta.validation.constraints.NotNull Long first, @jakarta.validation.constraints.NotNull Long second) {}
 
     /** 합성 키워드 상세 창(4.44): 요약 + 구성 원본 카드. expiresAt은 내가 가진 합성일 때만. */
-    public record MergedDetail(long keywordId, String text, int stars, long trendValue, long partSum, double multiplier,
+    public record MergedDetail(long keywordId, String text, int stars, long trendValue, long partSum, int multiplier,
                                Instant myExpiresAt, List<KeywordCard> parts) {}
 
     /** 구슬을 먹은 결과(4.20). status: GAINED(새로 추가) / RENEWED(이미 보유, 만료시간만 갱신) / LOST(내 키워드 하나를 잃음, gained = 줄어든 유행도) / MISS(잃을 키워드도 없는 꽝) / NONE(🔥 키워드 없음). */

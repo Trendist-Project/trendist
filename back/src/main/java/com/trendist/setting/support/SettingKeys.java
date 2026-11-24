@@ -19,7 +19,6 @@ public final class SettingKeys {
     public static final String ACTIVATE_HOLDERS = "activate_holders";
     public static final String KEYWORD_LENGTH_BONUS_PER_CHAR = "keyword_length_bonus_per_char";
     public static final String MERGE_ENABLED = "merge_enabled";
-    public static final String MERGE_SCORE_MULTIPLIER = "merge_score_multiplier";
     public static final String MERGE_EXPIRE_HOURS = "merge_expire_hours";
     public static final String MERGE_BONUS_BASE_PERCENT = "merge_bonus_base_percent";
     public static final String MERGE_BONUS_DECAY_PERCENT = "merge_bonus_decay_percent";
@@ -161,7 +160,6 @@ public final class SettingKeys {
             // 키워드 합성(4.44): 글자 수 가점과 합성 규칙. 점수에는 상한이 없다
             new Def(KEYWORD_LENGTH_BONUS_PER_CHAR, "1", 0, 100, "키워드 글자 수 가점: 공백을 뺀 글자 하나당 🔥 키워드 점수에 더하는 점수(0이면 끔)"),
             new Def(MERGE_ENABLED, "1", 0, 1, "키워드 합성 켜기(1) / 끄기(0)"),
-            new Def(MERGE_SCORE_MULTIPLIER, "2", 0, 100, "합성 점수 배율: 구성 원본(1성) 키워드 점수의 합에 곱하는 값"),
             new Def(MERGE_EXPIRE_HOURS, "24", 1, 720, "합성 키워드 유지 시간(합성한 시점부터, 몇 성이든 같다)"),
             new Def(MERGE_BONUS_BASE_PERCENT, "40", 0, 100, "합성 +1성 보너스 확률: 결과가 2성일 때의 확률(0이면 보너스 없음)"),
             new Def(MERGE_BONUS_DECAY_PERCENT, "50", 1, 99, "합성 +1성 보너스 확률 감소율: 결과 성이 1 오를 때마다 확률이 이 비율로 줄어든다(50 = 절반)"),
@@ -321,7 +319,7 @@ public final class SettingKeys {
                 ACTIVATE_HOLDERS, PLUS_TTL_HOURS,                                                                           // 키워드 상태·수명
                 EXTERNAL_CONFIRM_HEAT, EXTERNAL_HOLD_HOURS,                                                                 // 외부 소스
                 KEYWORD_LENGTH_BONUS_PER_CHAR);                                                                             // 글자 수 가점
-        group("합성", MERGE_ENABLED, MERGE_SCORE_MULTIPLIER, MERGE_EXPIRE_HOURS, MERGE_BONUS_BASE_PERCENT, MERGE_BONUS_DECAY_PERCENT);
+        group("합성", MERGE_ENABLED, MERGE_EXPIRE_HOURS, MERGE_BONUS_BASE_PERCENT, MERGE_BONUS_DECAY_PERCENT);
         group("성장·경험치·칭호", EXP_PER_PLUS, ATTACK_EXP, KILL_EXP, EXP_SCORE_CAP, RANK_TITLE_MIN_PLAYERS);
         group("맵·크기", WORLD_SIZE, AREA_GROW_SPEED, AREA_SHRINK_SPEED,           // 활동 영역
                 MIN_RADIUS, MAX_RADIUS, EAT_MIN_REACH, SCORE_CAP, ZOOM_FACTOR, VIEW_RANGE_MULTIPLIER);                // 원 크기
@@ -388,7 +386,7 @@ public final class SettingKeys {
         unit("시간", PLUS_TTL_HOURS, EXTERNAL_HOLD_HOURS, MERGE_EXPIRE_HOURS);
         unit("px", ZONE_REACH_PX, HOOK_REACH_PX, BOLT_REACH_PX, REPEL_REACH_PX, WORLD_SIZE, MIN_RADIUS, EAT_MIN_REACH, MAX_RADIUS, SAFE_CENTER_MIN, SAFE_ZONE_MIN);
         unit("px/s", MAX_SPEED, AREA_GROW_SPEED, AREA_SHRINK_SPEED);
-        unit("배", MERGE_SCORE_MULTIPLIER, VIEW_RANGE_MULTIPLIER, AMPLIFY_MULTIPLIER, HP_FLAME_MULTIPLIER, BIG_RATIO, KNOCKBACK_CAP, BOT_CAP_RATIO, DASH_SPEED_MULTIPLIER, REPEL_SPEED_MULTIPLIER,
+        unit("배", VIEW_RANGE_MULTIPLIER, AMPLIFY_MULTIPLIER, HP_FLAME_MULTIPLIER, BIG_RATIO, KNOCKBACK_CAP, BOT_CAP_RATIO, DASH_SPEED_MULTIPLIER, REPEL_SPEED_MULTIPLIER,
                 REPEL_KNOCKBACK);
         unit("%", MERGE_BONUS_BASE_PERCENT, MERGE_BONUS_DECAY_PERCENT, SKILL_HIT_DAMAGE_PERCENT, FORTIFY_PERCENT, BARRIER_HP_PERCENT, BERSERK_DRAIN_PERCENT, BERSERK_MIN_HP_PERCENT, SKILL_HEAL_PERCENT, SLOW_PERCENT, ORB_SPAWN_PERCENT, ORB_ACTIVE_PERCENT, HP_SAFE_REGEN_PERCENT, HP_KILL_HEAL_PERCENT, DEATH_LOSE_PERCENT, FLAME_HIT_LOSE_PERCENT);
         unit("명", TREND_MIN_POPULATION, ACTIVATE_HOLDERS, BOT_PLAYERS, BOT_MIN_PLAYERS, RANK_TITLE_MIN_PLAYERS);

@@ -33,7 +33,7 @@ export default {
   done: '{stars} {name} merged! +{gained} pts',
   doneBonus: '✨ Bonus! {name} added',
   detailTitle: 'Merged keyword',
-  multiplierChip: '× {mult} multiplier',
+  multiplierChip: '× {mult} (stars)',
   breakdown: 'Score breakdown',
   partsSumLabel: 'Parts total',
   scoreFormula: '({parts}) × {mult} = {score} pts',

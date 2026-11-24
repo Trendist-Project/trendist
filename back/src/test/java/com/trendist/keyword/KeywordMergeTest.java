@@ -101,7 +101,7 @@ class KeywordMergeTest {
         assertThat(formula.trendValue(true, 50, 2, 100, 20)).isEqualTo(120); // 100으로 자르지 않는다
         assertThat(formula.trendValue(true, 1, 1, 100, 5)).isEqualTo(10);    // 1명짜리 5글자: 5 + 5
         assertThat(formula.trendValue(false, 50, 1, 100, 20)).isZero();      // 💤는 가점도 없다
-        assertThat(formula.mergedValue(110)).isEqualTo(220);                 // 구성 합 × 2
+        assertThat(formula.mergedValue(110, 3)).isEqualTo(330);              // 구성 합 × 별 개수
     }
 
     @Test

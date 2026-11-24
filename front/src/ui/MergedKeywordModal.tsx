@@ -61,7 +61,7 @@ export function MergedKeywordModal({ keywordId, onClose, onPlused, onError, onSh
   }, [loadActivity]);
 
   const holdersSum = detail ? detail.parts.reduce((n, p) => n + p.holderCount, 0) : 0;
-  // 점수 구성: 구성 원본 점수의 합 × 배율. 💤 원본은 0점으로 보인다
+  // 점수 구성: 구성 원본 점수의 합 × 별 개수. 💤 원본은 0점으로 보인다
   const partScore = (p: KeywordCard) => (p.state === '활성' ? p.trendValue : 0);
   const partsTotal = detail ? detail.parts.reduce((n, p) => n + partScore(p), 0) : 0;
   const tier = detail ? tierOf(detail.trendValue, mins) : 0;

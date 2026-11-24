@@ -12,7 +12,7 @@ import org.springframework.stereotype.Component;
  * trend_value = 활성이면 w × (base + (max − base) × g), 아니면 0
  * 키워드 점수 = trend_value(트렌드 값이 곧 내 유행도에 더해지는 점수). 정수로 반올림한다(0.5는 올림).
  * 개정(4.44): 🔥활성이면 공백을 뺀 글자 수 × keyword_length_bonus_per_char를 더하고, 점수에 상한(예전의 100)을 두지 않는다.
- * 합성 키워드의 점수는 구성 원본(1성) 점수의 합 × merge_score_multiplier다({@link #mergedValue}).
+ * 합성 키워드의 점수는 구성 원본(1성) 점수의 합 × 별 개수(구성 원본 수)다({@link #mergedValue}).
  */
 @Component
 @RequiredArgsConstructor
@@ -37,9 +37,9 @@ public class TrendFormula {
         return Math.round(v) + bonus; // 상한 없음(4.44)
     }
 
-    /** 합성 점수(4.44): 구성 원본(1성) 키워드 점수의 합 × 배율. */
-    public long mergedValue(long partSum) {
-        return Math.round(Math.max(0, partSum) * settings.getDouble(SettingKeys.MERGE_SCORE_MULTIPLIER));
+    /** 합성 점수(4.44): 구성 원본(1성) 키워드 점수의 합 × 별 개수. */
+    public long mergedValue(long partSum, int stars) {
+        return Math.max(0, partSum) * Math.max(1, stars);
     }
 
     /**

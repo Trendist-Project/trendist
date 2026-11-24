@@ -33,7 +33,7 @@ export default {
   done: '{stars} {name} 합성! +{gained}점',
   doneBonus: '✨ 보너스! {name} 추가',
   detailTitle: '합성 키워드',
-  multiplierChip: '× {mult} 배율',
+  multiplierChip: '× {mult} (별 개수)',
   breakdown: '점수 구성',
   partsSumLabel: '구성 합',
   scoreFormula: '({parts}) × {mult} = {score}점',

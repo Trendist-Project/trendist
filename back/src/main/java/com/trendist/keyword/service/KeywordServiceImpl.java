@@ -888,7 +888,6 @@ public class KeywordServiceImpl implements KeywordService {
     public KeywordDtos.MergePreview mergePreview(long userId, long firstId, long secondId) {
         Player p = playerService.requireCurrent(userId);
         Instant now = Instant.now(clock);
-        double mult = settings.getDouble(SettingKeys.MERGE_SCORE_MULTIPLIER);
         int hours = settings.getInt(SettingKeys.MERGE_EXPIRE_HOURS);
         try {
             MergePlan plan = planMerge(p, firstId, secondId, now);
@@ -896,10 +895,10 @@ public class KeywordServiceImpl implements KeywordService {
             int stars = plan.parts().size();
             double pct = formula.mergeBonusPercent(stars);
             boolean possible = pct > 0 && !bonusCandidates(p, plan.parts(), plan.text(), now).isEmpty();
-            return new KeywordDtos.MergePreview(true, null, MergeKey.display(plan.parts()), stars, sum, mult, formula.mergedValue(sum), hours,
+            return new KeywordDtos.MergePreview(true, null, MergeKey.display(plan.parts()), stars, sum, stars, formula.mergedValue(sum, stars), hours,
                     MergeKey.length(plan.text()), MergeKey.MAX_TEXT_LENGTH, pct, possible, partsDto(plan.parts()));
         } catch (ApiException e) {
-            return new KeywordDtos.MergePreview(false, e.getMessage(), null, 0, 0, mult, 0, hours, 0, MergeKey.MAX_TEXT_LENGTH, 0, false, List.of());
+            return new KeywordDtos.MergePreview(false, e.getMessage(), null, 0, 0, 0, 0, hours, 0, MergeKey.MAX_TEXT_LENGTH, 0, false, List.of());
         }
     }
 
@@ -1030,7 +1029,7 @@ public class KeywordServiceImpl implements KeywordService {
         long sum = parts.stream().mapToLong(Keyword::getTrendValue).sum();
         Instant mine = playerKeywords.findByPlayerIdAndKeywordId(p.getId(), m.getId()).filter(pk -> !pk.isExpired(now)).map(PlayerKeyword::getExpiresAt).orElse(null);
         return new KeywordDtos.MergedDetail(m.getId(), MergeKey.display(parts), m.getStarCount(), m.getTrendValue(), sum,
-                settings.getDouble(SettingKeys.MERGE_SCORE_MULTIPLIER), mine, cards);
+                m.getStarCount(), mine, cards);
     }
 
     // ---- 보유 판정: 합성 키워드를 가지면 구성 원본을 가진 것(4.44)
@@ -1270,11 +1269,12 @@ public class KeywordServiceImpl implements KeywordService {
     /** 정규화 값(공백 제거)의 글자 수: 글자 수 가점(4.44)에 쓴다. */
     private static int normalizedLength(Keyword k) { return k.getNormalized().codePointCount(0, k.getNormalized().length()); }
 
-    /** 합성 키워드의 점수(4.44): 구성 원본(1성) 키워드 점수의 합 × 배율. 💤·금지 원본은 점수가 0이라 보태지 않는다. */
+    /** 합성 키워드의 점수(4.44): 구성 원본(1성) 키워드 점수의 합 × 별 개수. 💤·금지 원본은 점수가 0이라 보태지 않는다. */
     private long mergedTrend(Keyword m) {
         long sum = 0;
-        for (Keyword part : keywords.findAllById(mergeParts.findPartIds(m.getId()))) sum += part.getTrendValue();
-        return formula.mergedValue(sum);
+        int stars = 0;
+        for (Keyword part : keywords.findAllById(mergeParts.findPartIds(m.getId()))) { sum += part.getTrendValue(); stars++; }
+        return formula.mergedValue(sum, stars);
     }
 
     private void publishTrendChange(Keyword k, long oldTrend, long newTrend, Long excludePlayerId) {
