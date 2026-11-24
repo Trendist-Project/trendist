@@ -41,6 +41,7 @@ import { fmtNumber, t, tOr } from '../i18n';
 import { MonsterHud, MonsterNoteCard, type MonsterNote } from './MonsterHud';
 import { SkillIcon } from './SkillIcon';
 import { KillFeed, type FeedLine } from './KillFeed';
+import { PerfHud, perfHudEnabled } from './PerfHud';
 import { Tutorial, tutorialDone, markTutorialDone, type TutorialApi } from './Tutorial';
 import { playSfx, soundAudible, soundState, subscribeSound, unlockAudio } from '../game/sound';
 import { SoundPanel } from './SoundPanel';
@@ -438,6 +439,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
     <div className="game-shell">
       {emergency && <EmergencyBar text={emergencyText(emergency)} />}
     <div className={sideHidden ? 'game side-hidden' : 'game'}>
+      {perfHudEnabled() && <PerfHud pingMs={pingMs} />}
       {kicked && (
         <div className="modal-backdrop kicked-backdrop" role="alertdialog" aria-labelledby="kicked-title">
           <div className="modal kicked-box">

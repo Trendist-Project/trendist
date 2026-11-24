@@ -1,3 +1,4 @@
+import { wsStats } from './perfStats';
 import { getLang } from '../country';
 import { getToken, resumeSession } from '../api/client';
 import { parseMinimap, parseSnapshot, type MinimapEntry, type ServerMessage, type Snapshot } from './protocol';
@@ -48,11 +49,13 @@ export class GameConnection {
     };
     ws.onmessage = (ev) => {
       if (ev.data instanceof ArrayBuffer) {
+        wsStats.snapshots++; wsStats.bytes += ev.data.byteLength;
         const s = parseSnapshot(ev.data);
         if (s) { this.handlers.onSnapshot(s); return; }
         const mm = parseMinimap(ev.data);
         if (mm) this.handlers.onMinimap(mm);
       } else {
+        wsStats.texts++; wsStats.bytes += typeof ev.data === 'string' ? ev.data.length : 0;
         try { this.handlers.onMessage(JSON.parse(ev.data)); } catch { /* 무시 */ }
       }
     };
