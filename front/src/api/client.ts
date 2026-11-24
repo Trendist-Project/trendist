@@ -175,6 +175,8 @@ export const api = {
   myKeywords: () => request<MyKeyword[]>('GET', '/api/me/keywords'),
   /** 키워드 합성(4.44): 미리보기(항상 200, ok=false면 reason) → 확정 */
   mergePreview: (a: number, b: number) => request<MergePreview>('GET', `/api/me/keywords/merge-preview?a=${a}&b=${b}`),
+  /** 합성 불가 목록(4.44): from과 합칠 수 없는 보관함 키워드의 번호 → 이유. 합칠 수 있는 것은 없다 */
+  mergeBlocked: (from: number) => request<Record<number, string>>('GET', `/api/me/keywords/merge-blocked?from=${from}`),
   merge: (first: number, second: number) => request<MergeResult>('POST', '/api/me/keywords/merge', { first, second }),
   mergedDetail: (id: number) => request<MergedDetail>('GET', `/api/keywords/merged/${id}`),
   mergedActivity: (id: number, range: ActivityRange) => request<Activity>('GET', `/api/keywords/merged/${id}/activity?range=${range}`),

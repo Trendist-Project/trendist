@@ -248,6 +248,13 @@ body.side-resizing .arena { pointer-events: none; }
   color: var(--muted); background: transparent; border: 1px solid var(--line); transition: background 0.15s, color 0.15s, border-color 0.15s; }
 .sort-chip:hover { color: var(--text); border-color: #3a475c; background: #18212f; }
 .sort-chip.active { color: #062014; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+.star-chips .sort-chip { gap: 6px; }
+.star-chips .star-unit { display: inline-flex; align-items: center; gap: 1px; padding: 0 5px 0 3px; border-radius: 999px; background: rgba(255,200,61,0.14); } /* 별과 ×N을 한 덩어리로 */
+.star-chips .sort-chip.active .star-unit { background: rgba(0,0,0,0.14); }
+.star-chips .star-times { font-weight: 700; font-variant-numeric: tabular-nums; }
+.star-chips .star-mark { color: #ffc83d; font-size: 1.05em; line-height: 1; }
+.star-chips .sort-chip.active .star-mark { color: #b87500; } /* 켜진 칩은 초록 바탕이라 노란 별이 묻히지 않게 진한 금색 */
+.star-chips .star-count { opacity: 0.8; font-variant-numeric: tabular-nums; }
 .sort-arrow { font-size: 0.85em; line-height: 1; }
 @media (prefers-reduced-motion: reduce) { .sort-chip { transition: none; } }
 .list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
@@ -1510,12 +1517,12 @@ button.link-back:hover { color: var(--text); }
 /* 스킬창(4.33, K): 가로로 넓은 창. 왼쪽 장착한 스킬(세로 목록) · 오른쪽 위 스킬 아이콘 격자 · 오른쪽 아래 상세와 장착/해제 버튼. 종류 색은 스킬 바·툴팁과 같다 */
 .skill-btn.empty { border-style: dashed; color: var(--muted); background: rgba(11,15,23,0.45); }
 .skill-btn.empty:hover { color: var(--text); border-color: #7dd3fc; }
-.skill-window { width: min(940px, 100%); max-height: min(86vh, 760px); }
+.skill-window { width: min(1040px, 100%); max-height: min(92vh, 860px); } /* 스킬 목록이 5개씩 3줄 보이도록 가로·세로를 키웠다 */
 .skill-window .cat-attack { --cat: #ff7a90; }
 .skill-window .cat-defense { --cat: #5fd3c2; }
 .skill-window .cat-utility { --cat: #ffd166; }
 .skill-window .cat-cc { --cat: #b9a8ff; }
-.sw-layout { display: grid; grid-template-columns: minmax(380px, 0.85fr) minmax(0, 1.4fr); gap: 14px; align-items: start; }
+.sw-layout { display: grid; grid-template-columns: minmax(380px, 0.8fr) minmax(0, 1.5fr); gap: 14px; align-items: start; }
 .sw-left, .sw-right { position: relative; display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: #0f151f; align-content: start; min-width: 0; }
 .sw-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .sw-head h3 { margin: 0; font-size: 0.95rem; }
@@ -1566,9 +1573,9 @@ button.link-back:hover { color: var(--text); }
 .sw-arrow.side { animation-name: sw-bounce-x; }
 @keyframes sw-bounce-x { 50% { transform: translateX(-4px); } }
 .sw-right { container-type: inline-size; --tmax: 84px; --gx: 12px; --gy: 14px; --pt: 12px; --pb: 6px; --px: 10px; } /* 목록 크기 변수(화면이 작아지면 아래 미디어 쿼리가 바꾼다) */
-/* 스킬 목록은 두 줄까지만 보이고 나머지는 스크롤한다(스킬이 많아져도 아래 상세 칸이 밀리지 않게). 한 칸 크기 = min(최대 크기, 칸 폭), 높이 = 두 줄 + 줄 간격 + 위아래 여백 */
-.sw-grid { --tile: min(var(--tmax), calc((100cqw - 2 * var(--px) - 3 * var(--gx)) / 4)); list-style: none; margin: 0; padding: var(--pt) var(--px) var(--pb); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--gy) var(--gx);
-  max-height: calc(2 * var(--tile) + var(--gy) + var(--pt) + var(--pb)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+/* 스킬 목록은 5개씩 세 줄까지만 보이고 나머지는 스크롤한다(스킬이 많아져도 아래 상세 칸이 밀리지 않게). 한 칸 크기 = min(최대 크기, 칸 폭), 높이 = 세 줄 + 줄 간격 둘 + 위아래 여백 */
+.sw-grid { --tile: min(var(--tmax), calc((100cqw - 2 * var(--px) - 4 * var(--gx)) / 5)); list-style: none; margin: 0; padding: var(--pt) var(--px) var(--pb); display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--gy) var(--gx);
+  max-height: calc(3 * var(--tile) + 2 * var(--gy) + var(--pt) + var(--pb)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .sw-grid li { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
 .sw-tile { position: relative; width: 100%; max-width: var(--tmax); aspect-ratio: 1; padding: 0; border-radius: 16px; border: 2px solid var(--cat, var(--line)); background: color-mix(in srgb, var(--cat, #94a3b8) 14%, #0b0f17); display: inline-flex; align-items: center; justify-content: center; transition: box-shadow 0.12s; }
 .sw-tile .sw-ico { font-size: 2.2rem; line-height: 1; }
@@ -1775,8 +1782,9 @@ button.link-back:hover { color: var(--text); }
   .sw-bar-slots { gap: 4px; align-items: flex-start; }
   .sw-vsep { margin: 22px 1px 0; }
   .sw-cell { flex: 1 1 0; min-width: 0; gap: 4px; }
-  .sw-cell .sw-slot { width: 100%; height: auto; max-width: 60px; aspect-ratio: 1; }
-  .sw-cell .sw-keycap { min-width: 0; width: 100%; max-width: 60px; padding: 0 2px; height: 28px; font-size: 0.8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sw-cell .sw-slotwrap { width: 100%; max-width: 84px; }
+  .sw-cell .sw-slot { width: 100%; height: auto; max-width: 84px; aspect-ratio: 1; } /* 칸과 아래 키 버튼은 같은 가로 길이(칸 폭을 꽉 채운다) */
+  .sw-cell .sw-keycap { min-width: 0; width: 100%; max-width: 84px; padding: 0 2px; height: 28px; font-size: 0.8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sw-bar-tools { gap: 6px; }
   .sw-bar-tools button { min-width: 0; padding: 8px 6px; font-size: 0.8rem; white-space: nowrap; }
 }
@@ -2018,6 +2026,10 @@ button.link-back:hover { color: var(--text); }
 .mine-card .mine-stars { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: clip; font-size: 0.8rem; letter-spacing: 1px; line-height: 1.3; color: #ffd166; }
 .mine-card:not(.merged) .mine-stars { color: #d9b86a; }
 .mine-card .mine-row1 .mine-score { margin-left: 0; }
+.mine-tags { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.mine-fail { flex: none; padding: 1px 6px; border-radius: 999px; font-size: 0.68rem; font-weight: 700; font-variant-numeric: tabular-nums; color: #ffb4b4; background: rgba(239,90,90,0.14); border: 1px solid rgba(239,90,90,0.4); }
+.mine-len { flex: none; min-width: 1.6em; padding: 1px 6px; border-radius: 999px; font-size: 0.7rem; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums;
+  color: var(--muted); border: 1px solid var(--line); }
 .mine-card .mine-name { min-width: 0; padding-right: 34px; }
 .mine-card .mine-name strong { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.3; }
 .mine-card.tier3 .mine-name strong { color: #fff3d6; }
@@ -2081,7 +2093,7 @@ button.link-back:hover { color: var(--text); }
   background: color-mix(in srgb, var(--grade) 24%, transparent); color: color-mix(in srgb, var(--grade) 55%, #fff); border: 1px solid color-mix(in srgb, var(--grade) 55%, transparent); }
 .mine-card.tier3 .mine-name strong, .mine-card.tier4 .mine-name strong { color: var(--text); }
 
-/* 정렬 칩: 한 줄로만 보이고, 칸이 모자라면 줄바꿈 대신 옆으로 민다(터치·마우스 휠·마우스 끌기). 더 볼 쪽에 옅은 그림자 */
+/* 정렬·성별 칩: 한 줄로만 보이고, 칸이 모자라면 줄바꿈 대신 옆으로 민다(터치·마우스 휠·마우스 끌기). 더 볼 쪽에 옅은 그림자 */
 .sort-chips.scroll-row { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; scrollbar-width: none; cursor: grab; touch-action: pan-x; }
 .sort-chips.scroll-row::-webkit-scrollbar { display: none; }
 .sort-chips.scroll-row .sort-chip { flex: none; white-space: nowrap; }
@@ -2177,16 +2189,25 @@ button.link-back:hover { color: var(--text); }
 .merged-stars { color: #ffd166; letter-spacing: 2px; font-size: 0.95rem; line-height: 1; white-space: nowrap; }
 .merged-hero-top .kw-hold { margin-left: auto; flex: 1 1 140px; max-width: 240px; }
 .merged-score-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.merged-score-row { --score-fs: 2.6rem; }
+.merged-hero .kw-score strong { font-size: var(--score-fs); }
+@media (max-width: 760px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) { .merged-score-row { --score-fs: 2rem; } }
+@media (max-width: 760px) { .merged-score-row { --score-fs: clamp(1.6rem, 9vw, 2rem); } }
 .merged-mult { padding: 2px 9px; border-radius: 999px; border: 1px dashed var(--line); color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
 .merged-breakdown { display: grid; gap: 8px; }
 .merged-bar { display: flex; gap: 2px; height: 10px; border-radius: 6px; overflow: hidden; background: rgba(255,255,255,0.08); }
 .merged-bar i { display: block; flex-basis: 0; min-width: 4px; }
 .merged-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.82rem; }
 .merged-legend li { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.merged-legend li i { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.merged-legend li > i { width: 9px; height: 9px; border-radius: 50%; flex: none; } /* 구성 원본 색 점만(남은 시간 바 안의 <i>는 해당 없음) */
 .merged-legend li b { font-variant-numeric: tabular-nums; }
 .merged-legend li.zero { opacity: 0.55; }
-.merged-legend li.sum { margin-left: auto; color: var(--muted); }
+/* 합계 줄: 범례 아래 한 줄을 통째로 쓰고 한 줄로 고정한다(구성 합 · 곱하는 별 개수) */
+.merged-legend li.sum { flex: 1 0 100%; justify-content: space-between; flex-wrap: nowrap; white-space: nowrap; gap: 8px; margin-top: 2px; padding-top: 6px; border-top: 1px solid var(--line); color: var(--muted); }
+.merged-sum-formula { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.merged-sum-formula .merged-mult { padding: 0; border: 0; border-radius: 0; font-size: inherit; color: inherit; display: inline-flex; align-items: center; gap: 3px; }
+.merged-mult-star { width: 1em; height: 1em; flex: none; fill: #ffc83d; } /* 글자 별(★)은 글꼴마다 높이가 달라 줄에서 튀어 나오므로 그림으로 그려 글자와 같은 높이에 맞춘다 */
+.merged-hold { flex: 1 1 auto; min-width: 90px; max-width: 200px; } /* 합계 줄 왼쪽: 남은 시간 바와 글자 */
 .merged-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.85rem; color: var(--muted); }
 .merged-meta b { color: var(--text); font-weight: 700; }
 
@@ -2226,11 +2247,10 @@ button.link-back:hover { color: var(--text); }
   .merged-modal .modal-head { padding: 8px 14px; }
   .merged-modal .modal-body { padding: 8px 12px; gap: 8px; }
   .merged-hero { padding: 10px 12px; gap: 8px; }
-  .merged-hero .kw-score strong { font-size: 1.6rem; }
+  .merged-score-row { --score-fs: 1.6rem; }
 }
 @media (max-width: 420px) {
   .merged-hero-top .kw-hold { flex-basis: 100%; max-width: none; margin-left: 0; }
-  .merged-legend li.sum { margin-left: 0; }
 }
 
 /* 구성 카드 머리 줄: 접힌 줄(이름·상태·점수·AI) 오른쪽에, 펼치면 [공유]·[신고]가 키워드 옆 같은 줄에 붙는다 */

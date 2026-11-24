@@ -8,8 +8,8 @@ import { fmtNumber, t } from '../i18n';
 import { getLang } from '../country';
 import { PlayerSearch } from './PlayerSearch';
 import { DEFAULT_GRADE_MINS, starLabel, tierOf } from './mergeFormat';
-import { StarRow } from './StarRow';
 import { ScrollRow } from './ScrollRow';
+import { StarRow } from './StarRow';
 import { useLayer } from './layers';
 
 type Tab = 'search' | 'mine' | 'players';
@@ -35,13 +35,25 @@ interface Props {
 /** 보관함 정렬 기준. 기본은 남은 시간이 많은 것부터(곧 사라질 키워드가 아래로). */
 type SortKey = 'recent' | 'text' | 'state' | 'trend' | 'remaining';
 type SortDir = 'asc' | 'desc';
-// 칩은 이 순서로 보인다. 기본 정렬인 남은 시간을 맨 앞에 둔다
-const SORT_LABEL: Record<SortKey, string> = { remaining: t('side.sortRemaining'), recent: t('side.sortRecent'), text: t('side.sortText'), state: t('side.sortState'), trend: t('side.sortTrend') };
+// 칩은 이 순서로 보인다. 기본 정렬인 남은 시간을 맨 앞에, 그다음에 트렌드 점수를 둔다
+const SORT_LABEL: Record<SortKey, string> = { remaining: t('side.sortRemaining'), trend: t('side.sortTrend'), recent: t('side.sortRecent'), text: t('side.sortText'), state: t('side.sortState') };
 /** 기준을 고르면 먼저 쓰는 방향: 최신·트렌드·남은 시간은 큰 것부터, 키워드는 가나다, 상태는 🔥부터 */
 const DEFAULT_DIR: Record<SortKey, SortDir> = { recent: 'desc', text: 'asc', state: 'asc', trend: 'desc', remaining: 'desc' };
 const STATE_ORDER: Record<string, number> = { 활성: 0, 비활성: 1, 금지: 2 };
+/** 합성 이름의 글자 수 한도(서버 MergeKey.MAX_TEXT_LENGTH와 같다). 어긋나도 확정할 때 서버가 막는다 */
+const MERGE_MAX_LENGTH = 20;
 // 고른 정렬을 브라우저에 기억하는 키
 const SORT_STORE = 'trendist.mineSort.v2';
+
+// 고른 성(별 개수) 필터를 브라우저에 기억하는 키. 빈 목록은 전체
+const STAR_STORE = 'trendist.mineStars.v1';
+function loadStars(): number[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(STAR_STORE) ?? 'null');
+    if (Array.isArray(v) && v.every((n) => Number.isInteger(n) && n > 0)) return v;
+  } catch { /* 전체 */ }
+  return [];
+}
 
 function loadSort(): { key: SortKey; dir: SortDir } {
   try {
@@ -130,62 +142,70 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
   const sideRef = useRef<HTMLElement>(null);
   const [sort, setSort] = useState(loadSort);
   const [mins, setMins] = useState<number[]>(DEFAULT_GRADE_MINS); // 카드 등급 기준(4.42)
-  useEffect(() => { api.keywordGrades().then((g) => { if (Array.isArray(g.mins) && g.mins.length === 5) setMins(g.mins); }).catch(() => { /* 기본 기준 */ }); }, []);
-  const sortedMine = useMemo(() => sortMine(mine, sort.key, sort.dir), [mine, sort]);
+  const [fail, setFail] = useState<{ per: number; max: number } | null>(null); // 합성 실패 확률 기준(성당 %, 상한 %)
+  useEffect(() => { api.keywordGrades().then((g) => { if (Array.isArray(g.mins) && g.mins.length === 5) setMins(g.mins); if (typeof g.mergeFailPerStar === 'number') setFail({ per: g.mergeFailPerStar, max: g.mergeFailMax }); }).catch(() => { /* 기본 기준 */ }); }, []);
+  const [starFilter, setStarFilter] = useState(loadStars);
+  const starCounts = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const k of mine) m.set(k.stars, (m.get(k.stars) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => a[0] - b[0]);
+  }, [mine]);
+  // 보관함에 없는 성이 골라져 있으면(합성·만료로 사라짐) 필터에서 뺀다. 고른 성이 모두 사라지면 전체로 돌아간다
+  const activeStars = useMemo(() => starFilter.filter((n) => starCounts.some(([s]) => s === n)), [starFilter, starCounts]);
+  const sortedMine = useMemo(() => sortMine(mine, sort.key, sort.dir).filter((k) => activeStars.length === 0 || activeStars.includes(k.stars)), [mine, sort, activeStars]);
 
   // ---- 키워드 합성(4.44): 드래그(마우스)와 [🔗] 탭, 확정 전 미리보기, 합쳐지는 연출
   const [mergeFrom, setMergeFrom] = useState<number | null>(null); // 합성 모드: 이 카드와 합칠 짝을 고른다
   const merging = useRef(false); // 합성 요청 중(연타 방지)
   const [drag, setDrag] = useState<{ id: number; x: number; y: number; over: number | null } | null>(null);
-  const [probe, setProbe] = useState<number | null>(null); // 마우스·키보드가 가리키는 후보: 서버에 합칠 수 있는지 한 번 묻는다
-  const [verdict, setVerdict] = useState<Record<string, string>>({}); // 서버 판정 캐시: '' 은 가능, 그 밖은 불가 사유
+  const [blocked, setBlocked] = useState<{ from: number; reasons: Record<number, string> } | null>(null); // 출발 카드와 합칠 수 없는 카드 → 이유(서버가 한꺼번에 알려 준다)
   const [fresh, setFresh] = useState<{ id: number; bonus: boolean } | null>(null); // 방금 생긴 합성 카드
   const suppressClick = useRef(false);
   const timers = useRef<number[]>([]);
   useEffect(() => () => timers.current.forEach((id) => window.clearTimeout(id)), []);
   const mineById = useMemo(() => new Map(mine.map((k) => [k.keywordId, k])), [mine]);
   const source = drag?.id ?? mergeFrom;
-  const pairKey = (x: number, y: number) => (x < y ? `${x}:${y}` : `${y}:${x}`);
 
   /** 서버에 묻지 않고 아는 불가 사유(💤 비활성, 구성 겹침). 글자 수 초과 등은 서버 판정을 따른다 */
   const localReason = useCallback((a: MyKeyword, b: MyKeyword): string | null => {
     if (a.state !== '활성' || b.state !== '활성') return t('merge.reasonInactive');
     const ids = new Set(a.merged ? a.parts.map((p) => p.keywordId) : [a.keywordId]);
     if ((b.merged ? b.parts.map((p) => p.keywordId) : [b.keywordId]).some((id) => ids.has(id))) return t('merge.reasonOverlap');
+    // 글자 수 한도: 화면이 가진 구성 원본 이름만으로 바로 센다(서버와 같은 기준: 구분자 없이 이은 글자 수). 금지 조합만 서버가 알려 준다
+    const over = [a, b].reduce((n, k) => n + [...(k.merged && k.parts.length > 0 ? k.parts.map((p) => p.text).join('') : k.text)].length, 0) - MERGE_MAX_LENGTH;
+    if (over > 0) return t('merge.reasonTooLong', { n: over, max: MERGE_MAX_LENGTH });
     return null;
   }, []);
   const reasonFor = (id: number): string | null => {
     const a = source != null ? mineById.get(source) : undefined, b = mineById.get(id);
     if (!a || !b || a === b) return null;
-    return localReason(a, b) ?? (verdict[pairKey(a.keywordId, b.keywordId)] || null);
+    return localReason(a, b) ?? (blocked?.from === a.keywordId ? blocked.reasons[b.keywordId] ?? null : null);
   };
 
-  const endMerge = useCallback(() => { setMergeFrom(null); setProbe(null); setVerdict({}); }, []);
+  const endMerge = useCallback(() => { setMergeFrom(null); setBlocked(null); }, []);
   /** 두 카드를 확인 창 없이 바로 합친다. 합칠 수 없으면(서버 판정 포함) 이유를 알림으로 보여 준다 */
   const openPair = useCallback((aId: number, bId: number) => {
     const a = mineById.get(aId), b = mineById.get(bId);
     if (!a || !b || a === b || merging.current) return;
+    const chain = mergeFrom !== null; // [🔗]로 시작했다면 결과를 다음 출발 카드로 이어 연속으로 합친다(끌어서 합치기는 한 번으로 끝)
     endMerge();
     const why = localReason(a, b);
     if (why) { onError(why); return; }
     merging.current = true;
     api.merge(a.keywordId, b.keywordId)
-      .then((r) => handleMerged(r, a, b))
+      .then((r) => { handleMerged(r, a, b); if (chain && r.keyword && r.keyword.state === '활성' && (activeStars.length === 0 || activeStars.includes(r.keyword.stars))) setMergeFrom(r.keyword.keywordId); })
       .catch((e) => onError(e instanceof ApiFailure ? e.message : t('merge.failed')))
       .finally(() => { merging.current = false; });
-  }, [mineById, endMerge, localReason, onError]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [mineById, mergeFrom, activeStars, endMerge, localReason, onError]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 후보를 가리키면(호버·드래그 위·키보드 포커스) 서버 미리보기로 합칠 수 있는지 한 번만 묻는다. 보관함이 많아도 가리킨 카드만 묻는다
+  // 합성 모드를 켜거나 끌기를 시작하면 합칠 수 없는 카드를 한꺼번에 받아 흐리게 보여 준다(글자 수 초과·금지 조합처럼 서버만 아는 이유 포함).
+  // 응답 전에는 이미 아는 이유(💤·구성 겹침)만 보이고, 실패하면 확정 때 이유를 알려 준다
   useEffect(() => {
-    if (source == null || probe == null || probe === source) return;
-    const a = mineById.get(source), b = mineById.get(probe);
-    if (!a || !b || localReason(a, b) || pairKey(source, probe) in verdict) return;
-    const key = pairKey(source, probe);
-    const id = window.setTimeout(() => {
-      api.mergePreview(source, probe).then((p) => setVerdict((v) => ({ ...v, [key]: p.ok ? '' : (p.reason ?? t('merge.failed')) }))).catch(() => { /* 확정 때 알려 준다 */ });
-    }, 200);
-    return () => window.clearTimeout(id);
-  }, [source, probe, mineById, verdict, localReason]);
+    if (source == null) return;
+    let alive = true;
+    api.mergeBlocked(source).then((reasons) => { if (alive) setBlocked({ from: source, reasons }); }).catch(() => { /* 확정 때 알려 준다 */ });
+    return () => { alive = false; };
+  }, [source]);
 
   // 합성 모드: Esc나 보관함 카드 밖을 누르면 끝낸다
   useEffect(() => {
@@ -215,7 +235,7 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
     const stop = () => {
       window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
       window.removeEventListener('pointercancel', cancel); window.removeEventListener('keydown', onKey);
-      setDrag(null); setProbe(null);
+      setDrag(null);
     };
     const move = (ev: PointerEvent) => {
       if (!started) {
@@ -224,7 +244,6 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
       }
       const over = idAt(ev.clientX, ev.clientY);
       setDrag({ id: k.keywordId, x: ev.clientX, y: ev.clientY, over: over === k.keywordId ? null : over });
-      setProbe(over === k.keywordId ? null : over);
     };
     const up = (ev: PointerEvent) => {
       const over = started ? idAt(ev.clientX, ev.clientY) : null;
@@ -243,20 +262,22 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
   /** 합성이 끝났다: 기다리지 않고 바로 보관함을 새 값으로 바꾸고, 새 카드가 튀어 오른다(움직임 줄이기면 CSS가 번쩍임만 남긴다) */
   function handleMerged(r: MergeResult, a?: MyKeyword, b?: MyKeyword) {
     onMerged(r);
+    if (r.failed || !r.keyword) { void loadMine(); return; } // 실패: 사라진 재료를 반영하려고 보관함을 새로 읽는다
+    const kw = r.keyword;
     {
-      setMine((list) => [...list.filter((k) => k.keywordId !== a?.keywordId && k.keywordId !== b?.keywordId && k.keywordId !== r.keyword.keywordId), r.keyword]);
-      setFresh({ id: r.keyword.keywordId, bonus: r.bonus });
+      setMine((list) => [...list.filter((k) => k.keywordId !== a?.keywordId && k.keywordId !== b?.keywordId && k.keywordId !== kw.keywordId), kw]);
+      setFresh({ id: kw.keywordId, bonus: r.bonus });
       void loadMine();
-      timers.current.push(window.setTimeout(() => {
-        try { document.querySelector(`[data-mine-id="${r.keyword.keywordId}"]`)?.scrollIntoView({ block: 'nearest' }); } catch { /* 무시 */ }
-      }, 50));
-      timers.current.push(window.setTimeout(() => setFresh((f) => (f?.id === r.keyword.keywordId ? null : f)), 550));
+      timers.current.push(window.setTimeout(() => setFresh((f) => (f?.id === kw.keywordId ? null : f)), 550));
     }
   }
 
   useEffect(() => {
     try { localStorage.setItem(SORT_STORE, JSON.stringify(sort)); } catch { /* 이 브라우저에만 기억 */ }
   }, [sort]);
+  useEffect(() => {
+    try { localStorage.setItem(STAR_STORE, JSON.stringify(starFilter)); } catch { /* 이 브라우저에만 기억 */ }
+  }, [starFilter]);
 
   async function loadMine() { try { setMine(await api.myKeywords()); } catch { /* 다음에 다시 */ } }
 
@@ -395,6 +416,22 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
                   );
                 })}
               </ScrollRow>
+              {/* 성(별 개수) 필터: 보관함에 있는 성만 칩으로 보이고 개수가 붙는다. 여러 성을 함께 고를 수 있다 */}
+              {starCounts.some(([s]) => s > 1) && (
+                <ScrollRow className="sort-chips star-chips" role="group" aria-label={t('side.starGroup')}>
+                  <button className={activeStars.length === 0 ? 'sort-chip active' : 'sort-chip'} aria-pressed={activeStars.length === 0} onClick={() => setStarFilter([])}>{t('side.starAll')}</button>
+                  {starCounts.map(([s, n]) => {
+                    const on = activeStars.includes(s);
+                    return (
+                      <button key={s} className={on ? 'sort-chip active' : 'sort-chip'} aria-pressed={on}
+                              aria-label={t('side.starChipAria', { n: s, count: n })}
+                              onClick={() => setStarFilter(on ? activeStars.filter((x) => x !== s) : [...activeStars, s])}>
+                        <span className="star-unit" aria-hidden="true"><span className="star-mark">★</span><span className="star-times">×{s}</span></span><span className="star-count" aria-hidden="true">({n})</span>
+                      </button>
+                    );
+                  })}
+                </ScrollRow>
+              )}
             </div>
             <ul className={source != null ? 'list merge-active' : 'list'}>
               {sortedMine.map((k) => {
@@ -404,6 +441,7 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
                 const role = source == null ? null : id === source ? 'source' : reasonFor(id) ? 'bad' : 'ok';
                 return (
                   <MineCard key={id} k={k} mins={mins} role={role} reason={role === 'bad' ? reasonFor(id) : null}
+                            failPct={role === 'ok' && fail && source != null && mineById.get(source) ? Math.min(fail.max, fail.per * (mineById.get(source)!.stars + k.stars)) : null}
                             over={drag?.over === id} merging={null}
                             fresh={fresh?.id === id ? (fresh.bonus ? 'bonus' : 'yes') : null}
                             onOpen={() => { if (!suppressClick.current) onOpenKeyword(id, k.merged); }}
@@ -411,7 +449,6 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
                             onLinkDown={(e) => startDrag(e, k, true)}
                             mode={mergeFrom !== null}
                             onPick={pick}
-                            onProbe={() => { if (source != null) setProbe(id); }}
                             onDragStart={(e) => startDrag(e, k)} />
                 );
               })}
@@ -438,9 +475,9 @@ type Fx = 'yes' | 'bonus' | null;
  * 합성 키워드(4.44)는 이름 앞에 ★이 붙는다(4성 이상은 ★4). 이름이 구성 원본을 띄어 쓴 것이라 구성을 따로 적지 않는다. 오른쪽 [🔗]는 합성 모드를 켠다.
  * role: 합성 모드·드래그 중의 역할(source 출발 · ok 합칠 수 있음 · bad 합칠 수 없음, reason에 이유).
  */
-function MineCard({ k, mins, role, reason, over, merging, fresh, mode, onOpen, onLink, onLinkDown, onPick, onProbe, onDragStart }: {
-  k: MyKeyword; mins: number[]; role: 'source' | 'ok' | 'bad' | null; reason: string | null; over: boolean; merging: Fx; fresh: Fx; mode: boolean;
-  onOpen(): void; onLink(): void; onLinkDown(e: ReactPointerEvent): void; onPick(): void; onProbe(): void; onDragStart(e: ReactPointerEvent): void;
+function MineCard({ k, mins, role, reason, failPct, over, merging, fresh, mode, onOpen, onLink, onLinkDown, onPick, onDragStart }: {
+  k: MyKeyword; mins: number[]; role: 'source' | 'ok' | 'bad' | null; reason: string | null; failPct: number | null; over: boolean; merging: Fx; fresh: Fx; mode: boolean;
+  onOpen(): void; onLink(): void; onLinkDown(e: ReactPointerEvent): void; onPick(): void; onDragStart(e: ReactPointerEvent): void;
 }) {
   const left = new Date(k.expiresAt).getTime() - Date.now();
   const total = Math.max(new Date(k.expiresAt).getTime() - new Date(k.plusedAt).getTime(), left, 1);
@@ -452,15 +489,22 @@ function MineCard({ k, mins, role, reason, over, merging, fresh, mode, onOpen, o
   const cls = ['mine-item', 'mine-card', tone, `tier${tier}`, k.merged && 'merged', role && `merge-${role}`, over && 'merge-over',
     merging && `merging${merging === 'bonus' ? ' bonus' : ''}`, fresh && `merge-fresh${fresh === 'bonus' ? ' bonus' : ''}`].filter(Boolean).join(' ');
   const inactive = k.state !== '활성';
+  // 서버의 합성 글자 수 한도와 같은 기준: 구성 원본 이름을 구분자 없이 이은 글자 수(이름 속 띄어쓰기는 센다). 합성 카드의 이름에는 구분용 띄어쓰기가 있어 구성 이름으로 센다
+  const len = [...(k.merged && k.parts.length > 0 ? k.parts.map((p) => p.text).join('') : k.text)].length;
   return (
-    <li className={cls} data-mine-id={k.keywordId} onPointerEnter={onProbe} onFocus={onProbe} title={reason ?? undefined}>
+    <li className={cls} data-mine-id={k.keywordId} title={reason ?? undefined}>
       <button className="mine-open" onClick={mode ? onPick : onOpen} onPointerDown={onDragStart}
               aria-label={t('side.openAria', { kw: k.text })} aria-disabled={role === 'bad' || undefined}>
         <div className="mine-row1">
           {hasStars
             ? <StarRow stars={k.stars} label={t('merge.starsAria', { n: k.stars })} />  /* 별을 개수 그대로, 한 줄에 넘치면 ★×N */
             : <span className="mine-stars"><span className="badge">{STATE_BADGE[k.state] ?? k.state}</span></span>} {/* 비활성은 별 자리에 상태 태그 */}
-          <span className="mine-score" title={tier > 0 ? t(`side.tier${tier}`) : undefined}>{t('side.points', { n: fmtNumber(k.trendValue) })}</span>
+          <span className="mine-tags">
+            {/* 글자 수(합성 한도 20자 대비): 숫자만 있는 작은 태그. 점수 태그의 왼쪽에 둔다 */}
+            {failPct != null && <span className="mine-fail" title={t('merge.failChanceTitle')}>{t('merge.failChance', { p: Math.round(failPct) })}</span>}
+            <span className="mine-len" title={t('side.lengthTitle', { n: len })} aria-label={t('side.lengthTitle', { n: len })}>{len}</span>
+            <span className="mine-score" title={tier > 0 ? t(`side.tier${tier}`) : undefined}>{t('side.points', { n: fmtNumber(k.trendValue) })}</span>
+          </span>
         </div>
         <div className="mine-name"><strong title={k.text}>{k.text}</strong></div>
         <div className="mine-row3">

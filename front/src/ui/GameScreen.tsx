@@ -394,12 +394,17 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   // 키워드 합성(4.44): 점수·보유 수를 서버 값으로 맞추고, 소리와 알림을 낸다(보관함 갱신·카드 연출은 SidePanel이 한다)
   const onMerged = useCallback((r: MergeResult) => {
     setPlayer(r.player);
+    if (r.failed || !r.keyword) { // 합성 실패: 점수가 낮은 재료가 사라졌다
+      playSfx('lose');
+      showToast(t('merge.failedLost', { name: r.lost?.text ?? '', pts: Math.abs(r.gained) }));
+      return;
+    }
     if (r.gained > 0) arenaRef.current?.floatText(`+${r.gained}`);
     playSfx(r.bonus ? 'mergeBonus' : 'merge');
     // 합성 결과는 구슬 결과와 같은 카드 자리에 별·이름·점수로 보여 준다(빨간 오류 알림 모양이 아니라 보상 카드)
     showReveal({ type: 'orbResult', status: 'GAINED', text: r.keyword.text, gained: r.gained,
       merge: { stars: r.keyword.stars, bonus: r.bonus, bonusText: r.bonusPart?.text } });
-  }, [showReveal]);
+  }, [showReveal, showToast]);
   // 키워드 상세 창에서 +하면 보관함도 새로 읽는다
   const onPlusedInModal = useCallback((gained: number, p: PlayerSummary) => {
     onPlused(gained, p);
@@ -408,17 +413,25 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
   const sendChat = useCallback((text: string) => { connRef.current?.send({ type: 'chat', text }); }, []);
   // 키워드 상세 창의 [공유]: 채팅에 #키워드로 바로 보낸다. 채팅 태그는 공백 없는 글자만 이어지므로 공백을 뺀다
   // (검색은 공백을 무시하므로 누른 사람도 같은 키워드를 찾는다, 4.18). 채팅을 꺼 두었으면 켠다
-  const shareKeyword = useCallback((text: string) => {
-    const tag = `#${text.replace(/\s+/g, '')}`;
-    if (!connRef.current?.send({ type: 'chat', text: tag })) { showToast(t('gamescreen.shareAfterConnect')); return; }
+  // 여러 키워드(합성 키워드의 구성 원본)는 한 채팅에 #키워드1 #키워드2 … 로 보낸다
+  const shareKeywords = useCallback((texts: string[]) => {
+    const line = texts.map((x) => `#${x.replace(/\s+/g, '')}`).join(' ');
+    if (!connRef.current?.send({ type: 'chat', text: line })) { showToast(t('gamescreen.shareAfterConnect')); return; }
     setChatView((v) => (v === 'off' ? 'open' : v));
   }, [showToast]);
+  const shareKeyword = useCallback((text: string) => shareKeywords([text]), [shareKeywords]);
   // 플레이어 상세의 [공유]: 채팅에 @[닉네임](p번호)로 바로 보낸다. 채팅의 닉네임을 누르면 그 플레이어 상세가 열린다
   const sharePlayer = useCallback((playerId: number, nickname: string) => {
     if (!connRef.current?.send({ type: 'chat', text: `@[${nickname}](p${playerId})` })) { showToast(t('gamescreen.shareAfterConnect')); return; }
     setChatView((v) => (v === 'off' ? 'open' : v));
   }, [showToast]);
   const searchKeyword = useCallback((text: string) => setSearchRequest({ text, key: performance.now() }), []);
+  // 채팅의 #키워드를 눌렀다: 찾은 키워드면 상세 창을 열어 바로 추가할 수 있게 하고, 아직 없는 키워드면 검색창으로 보낸다
+  const openChatKeyword = useCallback((text: string) => {
+    api.search(text)
+      .then((r) => { if (r.status === 'FOUND' && r.keyword?.id != null) setOpenKeyword(r.keyword.id, false); else searchKeyword(text); })
+      .catch(() => searchKeyword(text));
+  }, [setOpenKeyword, searchKeyword]);
   const closeKeyword = useCallback(() => setOpenKeyword(null), [setOpenKeyword]);
 
   return (
@@ -473,7 +486,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
           {status !== 'open' && <span className="warn">{status === 'connecting' ? t('gamescreen.connecting') : t('gamescreen.reconnecting')}</span>}
         </div>
         <KillFeed lines={feed} />
-        {tutorial && status === 'open' && !dead && <Tutorial position={() => arenaRef.current?.myPosition() ?? null} bind={bindTutorial} onClose={() => setTutorial(false)} onOpenSearch={() => setSideRequest({ tab: 'search', key: Date.now() })} />}
+        {tutorial && status === 'open' && !dead && <Tutorial position={() => arenaRef.current?.myPosition() ?? null} bind={bindTutorial} onClose={() => setTutorial(false)} onOpenSearch={() => { setSide(false); setSideRequest({ tab: 'search', key: Date.now() }); }} />}
         {targetCard !== null && (
           <TargetCard entityNo={targetCard} following={followUi === targetCard} touchKey={targetTouch} read={readTarget} onClose={closeTargetCard}
                       onDetail={() => { const e = targetCard; setInfoBot(arenaRef.current?.botInfo(e) ?? null); setInfoLook(arenaRef.current?.entityInfo(e)?.look ?? null); setInfoEntity(e); }}
@@ -592,7 +605,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
           )}
         </div>
         {chatView !== 'off' && (
-          <ChatPanel ref={chatInputRef} lines={chatLines} disabled={status !== 'open'} onSend={sendChat} onKeyword={searchKeyword} onPlayer={setInfoPlayerId}
+          <ChatPanel ref={chatInputRef} lines={chatLines} disabled={status !== 'open'} onSend={sendChat} onKeyword={openChatKeyword} onPlayer={setInfoPlayerId}
                      onNotice={showToast} collapsed={chatView === 'collapsed'}
                      onToggleCollapsed={() => setChatView((v) => (v === 'collapsed' ? 'open' : 'collapsed'))} />
         )}
@@ -647,7 +660,7 @@ function GameScreenInner({ initialPlayer, guest, onLogout, onWithdrawn }: Props)
                          onOpenKeyword={(id, merged) => { setInfoPlayerId(null); setOpenKeyword(id, merged); }} onNotice={showToast} onShare={sharePlayer} />
       )}
       {openKeyword !== null && openKeywordMerged && (
-        <MergedKeywordModal keywordId={openKeyword} onClose={closeKeyword} onPlused={onPlusedInModal} onError={showToast} onShare={shareKeyword} />
+        <MergedKeywordModal keywordId={openKeyword} onClose={closeKeyword} onPlused={onPlusedInModal} onError={showToast} onShare={shareKeyword} onShareParts={shareKeywords} />
       )}
       {openKeyword !== null && !openKeywordMerged && (
         <KeywordModal keywordId={openKeyword} onClose={closeKeyword} onPlused={onPlusedInModal} onError={showToast} onShare={shareKeyword} />

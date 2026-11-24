@@ -5,7 +5,7 @@ export default {
   label: 'Chat',
   emptyCollapsed: 'No chat yet',
   emptyOpen: 'Leave the first message. Write #keyword and anyone who taps it can search it right away',
-  search: 'Search {kw}',
+  search: 'Open {kw}',
   report: 'Report',
   reportAria: "Report {name}'s message",
   connecting: 'Connecting…',

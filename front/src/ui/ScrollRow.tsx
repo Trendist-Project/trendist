@@ -33,14 +33,22 @@ export function ScrollRow({ className, children, ...rest }: HTMLAttributes<HTMLD
     return () => { el.removeEventListener('wheel', onWheel); el.removeEventListener('scroll', measure); ro?.disconnect(); };
   }, []);
 
-  // 선택된 칸이 가려져 있으면 보이게(칸 내용이 바뀔 때마다)
+  // 켜진 칸이 바뀌었을 때만, 켜진 칸이 하나도 온전히 보이지 않으면 가장 가까운 것을 보이는 자리로 스크롤한다.
+  // (렌더마다 첫 번째 켜진 칸으로 되돌리면, 오른쪽 칩을 눌렀을 때 줄이 제멋대로 왼쪽으로 튄다)
+  const seen = useRef('');
   useEffect(() => {
     const el = ref.current;
-    const active = el?.querySelector<HTMLElement>('.active');
-    if (!el || !active) return;
-    const l = active.offsetLeft - el.offsetLeft, r = l + active.offsetWidth;
-    if (l < el.scrollLeft) el.scrollLeft = l - 8;
-    else if (r > el.scrollLeft + el.clientWidth) el.scrollLeft = r - el.clientWidth + 8;
+    if (!el) return;
+    const actives = Array.from(el.querySelectorAll<HTMLElement>('.active'));
+    const sig = actives.map((a) => a.textContent).join('|');
+    if (sig === seen.current) { measure(); return; }
+    seen.current = sig;
+    const box = el.getBoundingClientRect();
+    const visible = (a: HTMLElement) => { const r = a.getBoundingClientRect(); return r.left >= box.left && r.right <= box.right; };
+    if (actives.length > 0 && !actives.some(visible)) {
+      const target = actives[0].getBoundingClientRect();
+      el.scrollLeft += target.left < box.left ? target.left - box.left - 8 : target.right - box.right + 8;
+    }
     measure();
   });
 

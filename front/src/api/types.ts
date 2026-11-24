@@ -74,16 +74,18 @@ export interface MyKeyword {
 
 /** 합성 키워드의 구성 원본 한 개(4.44) */
 /** 보관함 카드 등급 기준(4.42): normalMax는 노멀 등급의 끝, mins는 레어·에픽·유니크·레전드리·신화의 최소 점수 */
-export interface GradeInfo { normalMax: number; mins: number[] }
+/** mergeFailPerStar·mergeFailMax: 합성 실패 확률(%) = min(최대, 성당 확률 × 결과 성) */
+export interface GradeInfo { normalMax: number; mins: number[]; mergeFailPerStar: number; mergeFailMax: number }
 
 export interface MergedPart { keywordId: number; text: string; state: KeywordState; trendValue: number }
 
 /** 합성 미리보기(4.44). 항상 200이고 ok=false면 reason에 합칠 수 없는 이유가 있다 */
 export interface MergePreview {
-  ok: boolean; reason: string | null; text: string; stars: number; partSum: number; multiplier: number; score: number;
+  ok: boolean; reason: string | null; text: string; stars: number; partSum: number; multiplier: number; score: number; failPercent: number;
   expireHours: number; length: number; maxLength: number; bonusPercent: number; bonusPossible: boolean; parts: MergedPart[];
 }
-export interface MergeResult { keyword: MyKeyword; bonus: boolean; bonusPart: MergedPart | null; gained: number; player: PlayerSummary }
+/** 실패하면 failed가 true이고 keyword는 null, lost는 사라진 재료(점수가 낮은 쪽) */
+export interface MergeResult { keyword: MyKeyword | null; bonus: boolean; bonusPart: MergedPart | null; gained: number; player: PlayerSummary; failed: boolean; lost: { text: string; stars: number; trendValue: number } | null }
 /** 합성 키워드 상세 창(4.44): parts는 구성 원본의 일반 키워드 카드 */
 export interface MergedDetail {
   keywordId: number; text: string; stars: number; trendValue: number; partSum: number; multiplier: number;

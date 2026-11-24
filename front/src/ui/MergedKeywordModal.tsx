@@ -5,7 +5,7 @@ import { ActivityChart } from './ActivityChart';
 import { GeminiIcon } from './GeminiIcon';
 import { HoldGauge, KeywordActions, KeywordDetail } from './KeywordModal';
 import { STATE_BADGE } from './keywordFormat';
-import { DEFAULT_GRADE_MINS, starLabel, tierOf } from './mergeFormat';
+import { DEFAULT_GRADE_MINS, tierOf } from './mergeFormat';
 import { Modal } from './Modal';
 import { fmtNumber, t } from '../i18n';
 
@@ -18,6 +18,8 @@ interface Props {
   onPlused(gained: number, player: PlayerSummary): void;
   onError(message: string): void;
   onShare?(text: string): void;
+  /** 합성 키워드 공유: 구성 원본 이름들을 채팅에 #키워드1 #키워드2 … 한 줄로 보낸다 */
+  onShareParts?(texts: string[]): void;
 }
 
 /**
@@ -25,7 +27,8 @@ interface Props {
  * 맨 위 요약(이름·★·점수 산식·남은 시간), 구성 원본 전체의 통합 활동 그래프, 구성 키워드 카드 목록,
  * 카드마다 [자세히 ▾]로 그 자리에서 일반 상세 카드(개별 그래프·댓글·신고·공유)를 펼친다.
  */
-export function MergedKeywordModal({ keywordId, onClose, onPlused, onError, onShare }: Props) {
+export function MergedKeywordModal({ keywordId, onClose, onPlused, onError, onShare, onShareParts }: Props) {
+  const [shared, setShared] = useState(false); // 공유 직후 잠깐 버튼을 막는다(채팅은 1초에 1회)
   const [detail, setDetail] = useState<MergedDetail | null>(null);
   const [failed, setFailed] = useState(false);
   const [range, setRange] = useState<ActivityRange>('24h');
@@ -67,22 +70,28 @@ export function MergedKeywordModal({ keywordId, onClose, onPlused, onError, onSh
   const tier = detail ? tierOf(detail.trendValue, mins) : 0;
 
   return (
-    <Modal title={detail ? `${starLabel(detail.stars)} ${detail.text}`.trim() : t('merge.detailTitle')} onClose={onClose} className="keyword-modal merged-modal">
+    <Modal title={detail ? detail.text : t('merge.detailTitle')} onClose={onClose} className="keyword-modal merged-modal"
+           titleExtra={detail && onShareParts && detail.parts.length > 0 && (
+             <span className="kw-title-actions">
+               <button className="kw-share" disabled={shared} title={t('merge.shareTitle')} aria-label={t('merge.shareAria', { text: detail.text })}
+                       onClick={() => { onShareParts(detail.parts.map((p) => p.text)); setShared(true); window.setTimeout(() => setShared(false), 1500); }}>
+                 {shared ? t('keyword.shared') : t('keyword.share')}
+               </button>
+             </span>
+           )}>
       {failed && <p className="muted">{t('merge.loadFailed')}</p>}
       {!failed && !detail && <p className="muted">{t('common.loading')}</p>}
       {detail && (<>
-        {/* ① 등급·성·남은 시간 → ② 점수(크게) + 배율 → ③ 점수가 어떻게 나왔는지(구성 기여도 막대와 범례) */}
+        {/* ① 등급·성·남은 시간 → ② 점수(크게) → ③ 점수가 어떻게 나왔는지(구성 기여도 막대와 범례, 구성 합 옆에 × 별 개수) */}
         <section className={`kw-hero merged-hero grade-t${tier}`}>
           <div className="merged-hero-top">
             <span className="merged-grade">{t(`side.tier${tier}`)}</span>
             <span className="merged-stars" role="img" aria-label={t('merge.starsAria', { n: detail.stars })}>
               {'★'.repeat(Math.min(detail.stars, 8))}{detail.stars > 8 ? `×${detail.stars}` : ''}
             </span>
-            {detail.myExpiresAt && <HoldGauge expiresAt={detail.myExpiresAt} />}
           </div>
           <div className="merged-score-row">
             <div className="kw-score"><strong>{fmtNumber(detail.trendValue)}</strong><span>{t('keyword.pointsUnit')}</span></div>
-            <span className="merged-mult">{t('merge.multiplierChip', { mult: detail.multiplier })}</span>
           </div>
           <div className="merged-breakdown" aria-label={t('merge.breakdown')}>
             <div className="merged-bar" role="presentation">
@@ -98,7 +107,14 @@ export function MergedKeywordModal({ keywordId, onClose, onPlused, onError, onSh
                   <i style={{ background: SEG_COLORS[i % SEG_COLORS.length] }} />{p.text} <b>{fmtNumber(partScore(p))}</b>
                 </li>
               ))}
-              <li className="sum">{t('merge.partsSumLabel')} <b>{fmtNumber(partsTotal)}</b></li>
+              <li className="sum">
+                {detail.myExpiresAt ? <span className="merged-hold"><HoldGauge expiresAt={detail.myExpiresAt} /></span> : <span />}
+                <span className="merged-sum-formula">{t('merge.partsSumLabel')} <b>{fmtNumber(partsTotal)}</b>
+                  <span className="merged-mult" title={t('merge.multiplierChip', { mult: detail.multiplier })} aria-label={t('merge.multiplierChip', { mult: detail.multiplier })}>
+                    × <svg className="merged-mult-star" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l2.94 6.1 6.56.9-4.78 4.6 1.2 6.6L12 17.5l-5.92 3.2 1.2-6.6L2.5 9.5l6.56-.9z" /></svg>({detail.multiplier})
+                  </span>
+                </span>
+              </li>
             </ul>
           </div>
         </section>
