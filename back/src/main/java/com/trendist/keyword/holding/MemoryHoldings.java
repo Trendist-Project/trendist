@@ -470,7 +470,7 @@ public class MemoryHoldings implements Holdings {
                     }
                 }
             });
-            log.debug("memory holdings: synced {} changed rows to DB", changes.size());
+            log.info("memory holdings: synced {} changed rows to DB", changes.size());
         } catch (RuntimeException e) {
             log.warn("memory holdings: sync of {} rows failed; will retry", changes.size(), e);
             store.markDirty(changes);
@@ -479,5 +479,8 @@ public class MemoryHoldings implements Holdings {
 
     /** 정상 종료할 때 바뀐 행을 마지막으로 저장한다 */
     @PreDestroy
-    public void saveToDb() { flushToDb(); }
+    public void saveToDb() {
+        log.info("memory holdings: shutdown flush");
+        flushToDb();
+    }
 }

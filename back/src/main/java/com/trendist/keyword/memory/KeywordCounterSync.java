@@ -62,11 +62,12 @@ public class KeywordCounterSync {
             }
         }
         if (!failed.isEmpty()) c.markDirty(failed);
-        else log.debug("memory counters: synced {} keywords", dirty.size());
+        else log.info("memory counters: synced {} changed keywords to DB", dirty.size());
     }
 
     @PreDestroy
     void flushOnShutdown() {
+        log.info("memory counters: shutdown flush");
         flush();
         KeywordCounters.INSTANCE = null;
     }
