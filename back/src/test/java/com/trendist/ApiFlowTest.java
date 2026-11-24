@@ -178,8 +178,10 @@ class ApiFlowTest {
         long playerId = ((Number) JsonPath.read(mvc.perform(get("/api/me").header("Authorization", "Bearer " + t))
                 .andReturn().getResponse().getContentAsString(), "$.player.id")).longValue();
         keywordService.applyExternalTitles("KR", DataSource.GOOGLE, List.of("구슬테스트"));
-        // 60%(기본값)는 🔥 키워드를 얻고(이미 가진 키워드면 만료시간만 갱신), 나머지는 가진 키워드 하나를 잃는다. 가진 게 없으면 꽝
+        // 60%는 🔥 키워드를 얻고(이미 가진 키워드면 만료시간만 갱신), 나머지는 가진 키워드 하나를 잃는다. 가진 게 없으면 꽝. 기본값(100)과 무관하게 60으로 맞춰 확인한다
+        settingService.update(1, com.trendist.setting.support.SettingKeys.ORB_ACTIVE_PERCENT, "60");
         int gained = 0, lost = 0, miss = 0;
+        try {
         for (int i = 0; i < 300; i++) {
             var r = keywordService.openOrb(playerId);
             switch (r.status()) {
@@ -189,9 +191,10 @@ class ApiFlowTest {
                 default -> { assertThat(r.status()).isEqualTo("RENEWED"); assertThat(r.gained()).isZero(); assertThat(r.expiresAt()).isNotNull(); }
             }
         }
+        } finally { settingService.update(1, com.trendist.setting.support.SettingKeys.ORB_ACTIVE_PERCENT, "100"); }
         assertThat(gained).isPositive();
         assertThat(lost).isPositive();
-        assertThat(lost + miss).isBetween(80, 160); // 잃기 쪽으로 간 것은 약 40%(기본 얻을 확률 60%, 300번 중 120번 안팎)
+        assertThat(lost + miss).isBetween(80, 160); // 잃기 쪽으로 간 것은 약 40%(얻을 확률 60%, 300번 중 120번 안팎)
         mvc.perform(get("/api/me").header("Authorization", "Bearer " + t)).andExpect(jsonPath("$.player.holdCount").value(gained - lost));
     }
 
@@ -1276,8 +1279,8 @@ class ApiFlowTest {
         // 4.17, 4.20: 가이드가 보여 주는 구슬 확률(기본 60/40)과 레벨별 필요 EXP는 운영 값(설정·levels)에서 바로 읽는다. level-exp는 그 레벨로 올라갈 때 필요한 EXP다
         mvc.perform(get("/api/game-info/orb-odds"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.gainPercent").value(60))
-                .andExpect(jsonPath("$.losePercent").value(40));
+                .andExpect(jsonPath("$.gainPercent").value(100))
+                .andExpect(jsonPath("$.losePercent").value(0));
         mvc.perform(get("/api/game-info/level-exp").param("levels", "10,15,20,25,999,0"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$['10']").value(100))      // 그 레벨로 올라갈 때 필요한 EXP(레벨표 값 그대로)

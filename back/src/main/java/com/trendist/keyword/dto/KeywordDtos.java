@@ -25,12 +25,16 @@ public final class KeywordDtos {
      * 합성 미리보기(4.44). ok=false면 reason에 이유(글자 수 초과·구성 겹침·비활성 등).
      * score는 보너스 전 예상 점수(구성 점수 합 × 별 개수), bonusPercent는 +1성 보너스 확률(%), bonusPossible은 붙일 후보가 있는지.
      */
-    public record MergePreview(boolean ok, String reason, String text, int stars, long partSum, int multiplier, long score,
+    public record MergePreview(boolean ok, String reason, String text, int stars, long partSum, int multiplier, long score, double failPercent,
                                int expireHours, int length, int maxLength, double bonusPercent, boolean bonusPossible,
                                List<MergedPart> parts) {}
 
     /** 합성 결과(4.44). bonus면 bonusPart가 덤으로 붙은 키워드, gained는 유행도 변화. */
-    public record MergeResult(MyKeyword keyword, boolean bonus, MergedPart bonusPart, long gained, PlayerDtos.PlayerSummary player) {}
+    public record MergeResult(MyKeyword keyword, boolean bonus, MergedPart bonusPart, long gained, PlayerDtos.PlayerSummary player,
+                              boolean failed, LostMaterial lost) {}
+
+    /** 합성에 실패해 사라진 재료(점수가 낮은 쪽). 합성 키워드면 stars가 2 이상이다. */
+    public record LostMaterial(String text, int stars, long trendValue) {}
 
     public record MergeRequest(@jakarta.validation.constraints.NotNull Long first, @jakarta.validation.constraints.NotNull Long second) {}
 
@@ -54,7 +58,7 @@ public final class KeywordDtos {
     public record Activity(String range, String timezone, List<ActivityPoint> points, long searchCount, long addCount, long holders) {}
 
     /** 보관함 카드 등급 기준(4.42): normalMax는 노멀 등급의 끝(일반 키워드 1개의 최고 점수), mins는 레어·에픽·유니크·레전드리·신화의 최소 점수. */
-    public record GradeInfo(long normalMax, List<Long> mins) {}
+    public record GradeInfo(long normalMax, List<Long> mins, double mergeFailPerStar, double mergeFailMax) {}
 
     public record PlusRequest(@jakarta.validation.constraints.NotBlank String text) {}
 }

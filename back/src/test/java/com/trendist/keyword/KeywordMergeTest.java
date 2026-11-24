@@ -43,12 +43,16 @@ class KeywordMergeTest {
     @BeforeEach
     void noBonusByDefault() {
         settings.update(1, SettingKeys.MERGE_BONUS_BASE_PERCENT, "0"); // 확률 요소를 끄고 규칙만 본다
+        settings.update(1, SettingKeys.MERGE_FAIL_PER_STAR_PERCENT, "0");
     }
 
     @AfterEach
     void restoreSettings() {
         settings.update(1, SettingKeys.MERGE_BONUS_BASE_PERCENT, "40");
+        settings.update(1, SettingKeys.MERGE_FAIL_PER_STAR_PERCENT, "10");
+        settings.update(1, SettingKeys.MERGE_FAIL_MAX_PERCENT, "90");
         settings.update(1, SettingKeys.MERGE_BONUS_DECAY_PERCENT, "50");
+        settings.update(1, SettingKeys.MERGE_BONUS_MIN_PERCENT, "5");
     }
 
     // ---------------------------------------------------------------- 도우미
@@ -108,10 +112,16 @@ class KeywordMergeTest {
     void bonusChanceDropsAsStarsGrow() {
         assertThat(formula.mergeBonusPercent(2)).isEqualTo(0.0); // 이 테스트는 확률을 0으로 둔 상태
         settings.update(1, SettingKeys.MERGE_BONUS_BASE_PERCENT, "40");
+        settings.update(1, SettingKeys.MERGE_FAIL_PER_STAR_PERCENT, "10");
+        settings.update(1, SettingKeys.MERGE_FAIL_MAX_PERCENT, "90");
         assertThat(formula.mergeBonusPercent(2)).isEqualTo(40.0);
         assertThat(formula.mergeBonusPercent(3)).isEqualTo(20.0);
         assertThat(formula.mergeBonusPercent(4)).isEqualTo(10.0);
-        assertThat(formula.mergeBonusPercent(7)).isEqualTo(1.25);
+        assertThat(formula.mergeBonusPercent(5)).isEqualTo(5.0);
+        assertThat(formula.mergeBonusPercent(7)).isEqualTo(5.0);   // 최소 5%
+        assertThat(formula.mergeBonusPercent(20)).isEqualTo(5.0);
+        settings.update(1, SettingKeys.MERGE_BONUS_MIN_PERCENT, "0");
+        assertThat(formula.mergeBonusPercent(7)).isEqualTo(1.25);  // 최소값을 0으로 두면 예전처럼 줄어든다
     }
 
     // ---------------------------------------------------------------- 합성
@@ -213,6 +223,71 @@ class KeywordMergeTest {
                 .contentType(MediaType.APPLICATION_JSON).content("{\"text\":\"겹침가\"}")).andExpect(status().isConflict());
         var same = preview(other, x, x);
         assertThat(same.ok()).isFalse();
+    }
+
+    /** 실패 확률은 결과 성에 비례하고(2성 20%, 3성 30%…) 상한(90%)에서 멈춘다. */
+    @Test
+    void failChanceGrowsWithStarsUpToTheCap() {
+        settings.update(1, SettingKeys.MERGE_FAIL_PER_STAR_PERCENT, "10");
+        assertThat(formula.mergeFailPercent(2)).isEqualTo(20);
+        assertThat(formula.mergeFailPercent(3)).isEqualTo(30);
+        assertThat(formula.mergeFailPercent(9)).isEqualTo(90);
+        assertThat(formula.mergeFailPercent(12)).isEqualTo(90); // 상한
+    }
+
+    /** 실패하면 점수가 낮은 재료만 사라지고, 합성 키워드는 생기지 않으며 보유 수가 하나 준다. */
+    @Test
+    void failedMergeDestroysTheLowerScoredMaterial() throws Exception {
+        settings.update(1, SettingKeys.MERGE_FAIL_PER_STAR_PERCENT, "100"); // 반드시 실패
+        settings.update(1, SettingKeys.MERGE_FAIL_MAX_PERCENT, "100");
+        active("실패가"); active("실패나");
+        Me me = player("합성러실패");
+        plus(me, "실패가"); plus(me, "실패나");
+        var before = box(me);
+        long hold = holdCount(me);
+        long keepId = before.stream().max(java.util.Comparator.comparingLong(KeywordDtos.MyKeyword::trendValue)).orElseThrow().keywordId();
+        long lowScore = before.stream().mapToLong(KeywordDtos.MyKeyword::trendValue).min().orElseThrow();
+        long highScore = before.stream().mapToLong(KeywordDtos.MyKeyword::trendValue).max().orElseThrow();
+        var r = merge(me, idOf("실패가"), idOf("실패나"));
+        assertThat(r.failed()).isTrue();
+        assertThat(r.keyword()).isNull();
+        assertThat(r.lost().trendValue()).isEqualTo(lowScore);
+        assertThat(box(me)).hasSize(1);
+        if (lowScore != highScore) assertThat(box(me).get(0).keywordId()).isEqualTo(keepId); // 점수가 같으면 무작위라 어느 쪽이든 하나만 남는다
+        assertThat(holdCount(me)).isEqualTo(hold - 1);
+    }
+
+    /** 구성 원본은 글자 수가 적은 것부터 이어 붙고, 어느 쪽을 먼저 골라도 같다. */
+    @Test
+    void partsAreOrderedByLengthAscending() throws Exception {
+        active("가나다라마"); active("가나");
+        Me me = player("합성러순서");
+        plus(me, "가나다라마"); plus(me, "가나");
+        var r1 = merge(me, idOf("가나다라마"), idOf("가나"));
+        assertThat(r1.keyword().text()).isEqualTo("가나 + 가나다라마");
+        assertThat(r1.keyword().parts().stream().map(KeywordDtos.MergedPart::text).toList()).containsExactly("가나", "가나다라마");
+    }
+
+    /** 합성 불가 일괄 판정은 두 개씩 미리보기로 물은 결과와 같다(💤·글자 수·구성 겹침 포함). */
+    @Test
+    void mergeBlockedMatchesPairwisePreview() throws Exception {
+        active("일괄가"); active("일괄나"); active("일괄다");
+        active("가나다라마바사아자차카타"); active("하하하하하하하하하하하");
+        Me me = player("합성러일괄");
+        plus(me, "비활성일괄후보"); // 첫 +는 💤
+        for (String t : List.of("일괄가", "일괄나", "일괄다", "가나다라마바사아자차카타", "하하하하하하하하하하하")) plus(me, t);
+        long ab = merge(me, idOf("일괄가"), idOf("일괄나")).keyword().keywordId();
+
+        for (long from : box(me).stream().map(KeywordDtos.MyKeyword::keywordId).toList()) {
+            var blocked = keywordService.mergeBlocked(me.userId(), from);
+            for (var other : box(me)) {
+                if (other.keywordId() == from) continue;
+                var pv = preview(me, from, other.keywordId());
+                assertThat(blocked.containsKey(other.keywordId())).as("from=%d other=%d", from, other.keywordId()).isEqualTo(!pv.ok());
+                if (!pv.ok()) assertThat(blocked.get(other.keywordId())).isEqualTo(pv.reason());
+            }
+        }
+        assertThat(keywordService.mergeBlocked(me.userId(), ab)).doesNotContainKey(idOf("일괄다")); // 2성+1성은 합칠 수 있다
     }
 
     @Test

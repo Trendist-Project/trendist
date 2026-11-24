@@ -18,7 +18,9 @@ public final class MergeKey {
 
     public static final int MAX_TEXT_LENGTH = 20;
 
-    public static final Comparator<Keyword> ORDER = Comparator.comparing(Keyword::getNormalized).thenComparing(Keyword::getId);
+    /** 구성 원본의 순서: 글자 수가 적은 것부터(같으면 정규화 값, 번호 순). 어떤 순서로 골라도 같은 이름이 되도록 항상 이 순서로 이어 붙인다. */
+    public static final Comparator<Keyword> ORDER = Comparator.<Keyword>comparingInt(k -> length(k.getText()))
+            .thenComparing(Keyword::getNormalized).thenComparing(Keyword::getId);
 
     public static List<Keyword> sorted(java.util.Collection<Keyword> parts) {
         return parts.stream().sorted(ORDER).toList();

@@ -22,6 +22,9 @@ public final class SettingKeys {
     public static final String MERGE_EXPIRE_HOURS = "merge_expire_hours";
     public static final String MERGE_BONUS_BASE_PERCENT = "merge_bonus_base_percent";
     public static final String MERGE_BONUS_DECAY_PERCENT = "merge_bonus_decay_percent";
+    public static final String MERGE_BONUS_MIN_PERCENT = "merge_bonus_min_percent";
+    public static final String MERGE_FAIL_PER_STAR_PERCENT = "merge_fail_per_star_percent";
+    public static final String MERGE_FAIL_MAX_PERCENT = "merge_fail_max_percent";
     public static final String EXP_PER_PLUS = "exp_per_plus";
     public static final String ATTACK_EXP = "attack_exp";
     public static final String KILL_EXP = "kill_exp";
@@ -162,6 +165,9 @@ public final class SettingKeys {
             new Def(MERGE_ENABLED, "1", 0, 1, "키워드 합성 켜기(1) / 끄기(0)"),
             new Def(MERGE_EXPIRE_HOURS, "24", 1, 720, "합성 키워드 유지 시간(합성한 시점부터, 몇 성이든 같다)"),
             new Def(MERGE_BONUS_BASE_PERCENT, "40", 0, 100, "합성 +1성 보너스 확률: 결과가 2성일 때의 확률(0이면 보너스 없음)"),
+            new Def(MERGE_BONUS_MIN_PERCENT, "5", 0, 100, "합성 +1성 보너스 확률의 최소값(%): 높은 성에서 확률이 줄어도 이 값 밑으로는 내려가지 않는다(기본 확률이 0이면 보너스 자체가 없음)"),
+            new Def(MERGE_FAIL_PER_STAR_PERCENT, "10", 0, 100, "합성 실패 확률: 결과 성 하나당 더해지는 %(10이면 2성 20%, 3성 30%). 실패하면 재료 중 점수가 낮은 쪽이 사라진다"),
+            new Def(MERGE_FAIL_MAX_PERCENT, "90", 0, 100, "합성 실패 확률의 상한(%)"),
             new Def(MERGE_BONUS_DECAY_PERCENT, "50", 1, 99, "합성 +1성 보너스 확률 감소율: 결과 성이 1 오를 때마다 확률이 이 비율로 줄어든다(50 = 절반)"),
             new Def(EXP_PER_PLUS, "1", 0, 100, "+ 한 번의 EXP"),
             new Def(ATTACK_EXP, "1", 0, 100, "공격에 성공할 때마다 얻는 EXP(키워드를 빼앗거나 잃게 한 것마다, 봇이 상대여도, 불꽃으로 모두 잃게 해도 한 번)"),
@@ -195,7 +201,7 @@ public final class SettingKeys {
             new Def(BOT_MIN_PLAYERS, "1", 0, 200, "봇 최소 인원: 사람이 있으면 방 인원과 관계없이 봇을 이 수 이상 둔다(0이면 사람이 많을 때 봇 없음)"),
             new Def(BOT_CAP_RATIO, "1.0", 0.1, 10, "봇 유행도 상한: 그 방에 접속 중인 사람 유행도 평균의 이 배수(1이면 평균)"),
             new Def(RANK_TITLE_MIN_PLAYERS, "10", 1, 1000, "순위 칭호(핫스타·시상대·정상) 최소 접속 인원: 지금 그 나라에 접속 중인 사람이 이 인원 이상일 때만 순위 칭호를 준다"),
-            new Def(ORB_ACTIVE_PERCENT, "60", 0, 100, "? 구슬에서 🔥활성 키워드를 얻을 확률(%). 나머지는 가진 키워드 하나를 잃음(🔥·💤 무관, 없으면 꽝)"),
+            new Def(ORB_ACTIVE_PERCENT, "100", 0, 100, "? 구슬에서 🔥활성 키워드를 얻을 확률(%). 나머지는 가진 키워드 하나를 잃음(🔥·💤 무관, 없으면 꽝)"),
             // 세이프존(4.22): 안에서는 부딪히지 않고(튕김·키워드 잃기 없음) 겹쳐 있을 수 있다
             new Def(SAFE_CENTER_RATIO, "0.09", 0.01, 0.5, "가운데 고정 세이프존 한 변: 활동 영역 한 변의 이 비율"),
             new Def(SAFE_CENTER_MIN, "1800", 100, 5000, "가운데 고정 세이프존 한 변 최소"),
@@ -319,7 +325,7 @@ public final class SettingKeys {
                 ACTIVATE_HOLDERS, PLUS_TTL_HOURS,                                                                           // 키워드 상태·수명
                 EXTERNAL_CONFIRM_HEAT, EXTERNAL_HOLD_HOURS,                                                                 // 외부 소스
                 KEYWORD_LENGTH_BONUS_PER_CHAR);                                                                             // 글자 수 가점
-        group("합성", MERGE_ENABLED, MERGE_EXPIRE_HOURS, MERGE_BONUS_BASE_PERCENT, MERGE_BONUS_DECAY_PERCENT);
+        group("합성", MERGE_ENABLED, MERGE_EXPIRE_HOURS, MERGE_BONUS_BASE_PERCENT, MERGE_BONUS_DECAY_PERCENT, MERGE_BONUS_MIN_PERCENT, MERGE_FAIL_PER_STAR_PERCENT, MERGE_FAIL_MAX_PERCENT);
         group("성장·경험치·칭호", EXP_PER_PLUS, ATTACK_EXP, KILL_EXP, EXP_SCORE_CAP, RANK_TITLE_MIN_PLAYERS);
         group("맵·크기", WORLD_SIZE, AREA_GROW_SPEED, AREA_SHRINK_SPEED,           // 활동 영역
                 MIN_RADIUS, MAX_RADIUS, EAT_MIN_REACH, SCORE_CAP, ZOOM_FACTOR, VIEW_RANGE_MULTIPLIER);                // 원 크기
@@ -388,7 +394,7 @@ public final class SettingKeys {
         unit("px/s", MAX_SPEED, AREA_GROW_SPEED, AREA_SHRINK_SPEED);
         unit("배", VIEW_RANGE_MULTIPLIER, AMPLIFY_MULTIPLIER, HP_FLAME_MULTIPLIER, BIG_RATIO, KNOCKBACK_CAP, BOT_CAP_RATIO, DASH_SPEED_MULTIPLIER, REPEL_SPEED_MULTIPLIER,
                 REPEL_KNOCKBACK);
-        unit("%", MERGE_BONUS_BASE_PERCENT, MERGE_BONUS_DECAY_PERCENT, SKILL_HIT_DAMAGE_PERCENT, FORTIFY_PERCENT, BARRIER_HP_PERCENT, BERSERK_DRAIN_PERCENT, BERSERK_MIN_HP_PERCENT, SKILL_HEAL_PERCENT, SLOW_PERCENT, ORB_SPAWN_PERCENT, ORB_ACTIVE_PERCENT, HP_SAFE_REGEN_PERCENT, HP_KILL_HEAL_PERCENT, DEATH_LOSE_PERCENT, FLAME_HIT_LOSE_PERCENT);
+        unit("%", MERGE_BONUS_BASE_PERCENT, MERGE_BONUS_DECAY_PERCENT, MERGE_BONUS_MIN_PERCENT, MERGE_FAIL_PER_STAR_PERCENT, MERGE_FAIL_MAX_PERCENT, SKILL_HIT_DAMAGE_PERCENT, FORTIFY_PERCENT, BARRIER_HP_PERCENT, BERSERK_DRAIN_PERCENT, BERSERK_MIN_HP_PERCENT, SKILL_HEAL_PERCENT, SLOW_PERCENT, ORB_SPAWN_PERCENT, ORB_ACTIVE_PERCENT, HP_SAFE_REGEN_PERCENT, HP_KILL_HEAL_PERCENT, DEATH_LOSE_PERCENT, FLAME_HIT_LOSE_PERCENT);
         unit("명", TREND_MIN_POPULATION, ACTIVATE_HOLDERS, BOT_PLAYERS, BOT_MIN_PLAYERS, RANK_TITLE_MIN_PLAYERS);
         unit("개", ORB_MAX, SAFE_ZONE_MAX, AI_COMMENT_BATCH_SIZE, FIREBALL_COUNT, QUAKE_DROP_KEYWORDS);
         unit("겹", POISON_MAX_STACKS, SLOW_MAX_STACKS);

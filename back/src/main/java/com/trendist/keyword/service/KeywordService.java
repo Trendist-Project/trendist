@@ -3,6 +3,7 @@ package com.trendist.keyword.service;
 import com.trendist.keyword.dto.KeywordDtos;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -25,6 +26,9 @@ public interface KeywordService {
 
     /** 합성 미리보기(4.44): 두 보관함 키워드를 합치면 어떻게 되는지. 합칠 수 없으면 ok=false와 이유. 확률 결과는 알려 주지 않는다. */
     KeywordDtos.MergePreview mergePreview(long userId, long firstId, long secondId);
+
+    /** 합성 불가 목록: fromId와 합칠 수 없는 다른 보관함 키워드마다 이유를 한꺼번에 준다(합성 모드·끌기를 시작할 때 쓴다). 합칠 수 있는 것은 빠진다. */
+    Map<Long, String> mergeBlocked(long userId, long fromId);
 
     /** 합성(4.44): 🔥활성 보관함 키워드 둘을 합쳐 ★ 합성 키워드 하나로 바꾼다. 일정 확률로 +1성 보너스가 붙는다. */
     KeywordDtos.MergeResult merge(long userId, long firstId, long secondId);

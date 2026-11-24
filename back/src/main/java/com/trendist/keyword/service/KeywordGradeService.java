@@ -36,6 +36,7 @@ public class KeywordGradeService {
         long[] mins = new long[MULTIPLES.length + 1];
         mins[0] = base + 1; // 레어: 일반 키워드의 한계를 넘는 점수
         for (int i = 0; i < MULTIPLES.length; i++) mins[i + 1] = base * MULTIPLES[i];
-        return new KeywordDtos.GradeInfo(base, java.util.Arrays.stream(mins).boxed().toList());
+        return new KeywordDtos.GradeInfo(base, java.util.Arrays.stream(mins).boxed().toList(),
+                settings.getDouble(SettingKeys.MERGE_FAIL_PER_STAR_PERCENT), settings.getDouble(SettingKeys.MERGE_FAIL_MAX_PERCENT));
     }
 }

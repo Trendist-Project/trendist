@@ -42,13 +42,21 @@ public class TrendFormula {
         return Math.max(0, partSum) * Math.max(1, stars);
     }
 
+    /** 합성 실패 확률(%): 결과 성 × 성당 확률, 상한까지. 2성 20%, 3성 30%, … 기본 상한 90%. */
+    public double mergeFailPercent(int stars) {
+        double per = settings.getDouble(SettingKeys.MERGE_FAIL_PER_STAR_PERCENT), max = settings.getDouble(SettingKeys.MERGE_FAIL_MAX_PERCENT);
+        return Math.max(0, Math.min(max, per * Math.max(0, stars)));
+    }
+
     /**
      * +1성 보너스 확률(%, 4.44): 합성 결과의 성(보너스 전)이 높을수록 낮다. base × (decay/100)^(성 − 2). 2성 미만은 base.
      */
     public double mergeBonusPercent(int stars) {
         double base = settings.getDouble(SettingKeys.MERGE_BONUS_BASE_PERCENT);
         double decay = settings.getDouble(SettingKeys.MERGE_BONUS_DECAY_PERCENT) / 100.0;
-        return Math.min(100, Math.max(0, base * Math.pow(decay, Math.max(0, stars - 2))));
+        if (base <= 0) return 0; // 기본 확률 0이면 보너스 자체가 없다(최소값도 적용하지 않는다)
+        double min = settings.getDouble(SettingKeys.MERGE_BONUS_MIN_PERCENT);
+        return Math.min(100, Math.max(min, base * Math.pow(decay, Math.max(0, stars - 2))));
     }
 
     public long expScore(long exp) { return Math.min(exp, settings.getInt(SettingKeys.EXP_SCORE_CAP)); }

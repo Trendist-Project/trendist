@@ -9,6 +9,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpHeaders;
 import java.util.List;
+import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -58,6 +59,11 @@ public class KeywordController {
     @GetMapping("/me/keywords/merge-preview")
     public KeywordDtos.MergePreview mergePreview(@AuthenticationPrincipal AuthUser user, @RequestParam long a, @RequestParam long b) {
         return service.mergePreview(user.userId(), a, b);
+    }
+
+    @GetMapping("/me/keywords/merge-blocked")
+    public Map<Long, String> mergeBlocked(@AuthenticationPrincipal AuthUser user, @RequestParam long from) {
+        return service.mergeBlocked(user.userId(), from);
     }
 
     @PostMapping("/me/keywords/merge")

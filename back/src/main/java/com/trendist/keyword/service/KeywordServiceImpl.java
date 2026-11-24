@@ -855,32 +855,48 @@ public class KeywordServiceImpl implements KeywordService {
                 .orElseThrow(() -> ApiException.notFound("NOT_HELD", "보관함에 없는 키워드예요"));
     }
 
-    /** 합성할 수 있는지 검사하고 계획을 만든다. 합칠 수 없으면 이유를 담은 ApiException. */
-    private MergePlan planMerge(Player p, long firstId, long secondId, Instant now) {
+    private void assertMergeEnabled() {
         if (settings.getInt(SettingKeys.MERGE_ENABLED) == 0) throw ApiException.badRequest("MERGE_DISABLED", "지금은 합성할 수 없어요");
-        if (firstId == secondId) throw ApiException.badRequest("MERGE_SAME", "서로 다른 키워드를 골라 주세요");
-        PlayerKeyword a = heldRow(p, firstId, now), b = heldRow(p, secondId, now);
+    }
+
+    /**
+     * 두 재료가 합쳐지는지 보는 규칙(조회 없음): 금지·비활성·구성 겹침·글자 수·금지 조합. 합칠 수 없으면 이유를 담은 ApiException,
+     * 합칠 수 있으면 이어 붙일(정렬한) 구성 원본을 준다. 구성 원본은 합성 키워드면 그 구성, 아니면 자기 자신이다.
+     * 합성 실행(planMerge)과 합성 불가 일괄 판정(mergeBlocked)이 같이 쓴다.
+     */
+    private List<Keyword> checkMergeable(Player p, Keyword a, List<Keyword> aParts, Keyword b, List<Keyword> bParts) {
         Map<Long, Keyword> parts = new LinkedHashMap<>();
-        for (PlayerKeyword row : List.of(a, b)) {
-            Keyword k = row.getKeyword();
+        for (Keyword k : List.of(a, b)) {
             if (isBanned(k)) throw ApiException.badRequest("KEYWORD_BANNED", "합칠 수 없는 키워드예요");
             // 🔥활성 키워드끼리만 합칠 수 있다(합성 키워드는 항상 🔥)
             if (!k.isMerged() && !isState(k, CodeTables.KW_ACTIVE)) throw ApiException.badRequest("MERGE_NEEDS_ACTIVE", "활성 키워드만 합칠 수 있어요");
-            List<Keyword> ps = k.isMerged() ? keywords.findAllById(mergeParts.findPartIds(k.getId())) : List.of(k);
-            for (Keyword part : ps) {
-                if (parts.putIfAbsent(part.getId(), part) != null) throw ApiException.badRequest("MERGE_OVERLAP", "이미 들어 있는 키워드가 겹쳐요");
-            }
+        }
+        for (Keyword part : aParts) parts.put(part.getId(), part);
+        for (Keyword part : bParts) {
+            if (parts.putIfAbsent(part.getId(), part) != null) throw ApiException.badRequest("MERGE_OVERLAP", "이미 들어 있는 키워드가 겹쳐요");
         }
         List<Keyword> sorted = MergeKey.sorted(parts.values());
-        String text = MergeKey.text(sorted);
-        int len = MergeKey.length(text);
+        int len = MergeKey.length(MergeKey.text(sorted));
         if (len > MergeKey.MAX_TEXT_LENGTH) {
             throw ApiException.badRequest("MERGE_TOO_LONG", (len - MergeKey.MAX_TEXT_LENGTH) + "자를 초과합니다 (최대 " + MergeKey.MAX_TEXT_LENGTH + "자)");
         }
         if (bannedWords.contains(p.getCountry().getCode(), MergeKey.joinedNormalized(sorted))) {
             throw ApiException.badRequest("KEYWORD_BANNED", "합칠 수 없는 조합이에요");
         }
-        return new MergePlan(a, b, sorted, text);
+        return sorted;
+    }
+
+    private List<Keyword> partsOf(Keyword k) {
+        return k.isMerged() ? keywords.findAllById(mergeParts.findPartIds(k.getId())) : List.of(k);
+    }
+
+    /** 합성할 수 있는지 검사하고 계획을 만든다. 합칠 수 없으면 이유를 담은 ApiException. */
+    private MergePlan planMerge(Player p, long firstId, long secondId, Instant now) {
+        assertMergeEnabled();
+        if (firstId == secondId) throw ApiException.badRequest("MERGE_SAME", "서로 다른 키워드를 골라 주세요");
+        PlayerKeyword a = heldRow(p, firstId, now), b = heldRow(p, secondId, now);
+        List<Keyword> sorted = checkMergeable(p, a.getKeyword(), partsOf(a.getKeyword()), b.getKeyword(), partsOf(b.getKeyword()));
+        return new MergePlan(a, b, sorted, MergeKey.text(sorted));
     }
 
     @Override
@@ -895,11 +911,45 @@ public class KeywordServiceImpl implements KeywordService {
             int stars = plan.parts().size();
             double pct = formula.mergeBonusPercent(stars);
             boolean possible = pct > 0 && !bonusCandidates(p, plan.parts(), plan.text(), now).isEmpty();
-            return new KeywordDtos.MergePreview(true, null, MergeKey.display(plan.parts()), stars, sum, stars, formula.mergedValue(sum, stars), hours,
+            return new KeywordDtos.MergePreview(true, null, MergeKey.display(plan.parts()), stars, sum, stars, formula.mergedValue(sum, stars), formula.mergeFailPercent(stars), hours,
                     MergeKey.length(plan.text()), MergeKey.MAX_TEXT_LENGTH, pct, possible, partsDto(plan.parts()));
         } catch (ApiException e) {
-            return new KeywordDtos.MergePreview(false, e.getMessage(), null, 0, 0, 0, 0, hours, 0, MergeKey.MAX_TEXT_LENGTH, 0, false, List.of());
+            return new KeywordDtos.MergePreview(false, e.getMessage(), null, 0, 0, 0, 0, 0, hours, 0, MergeKey.MAX_TEXT_LENGTH, 0, false, List.of());
         }
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Map<Long, String> mergeBlocked(long userId, long fromId) {
+        Player p = playerService.requireCurrent(userId);
+        Instant now = Instant.now(clock);
+        // 보관함과 합성 구성 원본을 한 번에 읽어 메모리에서 판정한다(카드마다 조회하지 않는다)
+        List<PlayerKeyword> rows = playerKeywords.findActiveByPlayer(p.getId(), now, codes.keywordStateId(CodeTables.KW_BANNED));
+        Keyword from = rows.stream().map(PlayerKeyword::getKeyword).filter(k -> k.getId().equals(fromId)).findFirst()
+                .orElseThrow(() -> ApiException.notFound("NOT_HELD", "보관함에 없는 키워드예요"));
+        Map<Long, String> blocked = new LinkedHashMap<>();
+        boolean enabled = settings.getInt(SettingKeys.MERGE_ENABLED) != 0;
+        List<Long> mergedIds = rows.stream().map(PlayerKeyword::getKeyword).filter(Keyword::isMerged).map(Keyword::getId).toList();
+        Map<Long, List<Long>> partIdsOf = new HashMap<>();
+        Set<Long> allPartIds = new HashSet<>();
+        if (!mergedIds.isEmpty()) {
+            for (KeywordMergePart mp : mergeParts.findByKeywordIds(mergedIds)) {
+                partIdsOf.computeIfAbsent(mp.getKeywordId(), x -> new ArrayList<>()).add(mp.getPartKeywordId());
+                allPartIds.add(mp.getPartKeywordId());
+            }
+        }
+        Map<Long, Keyword> partById = new HashMap<>();
+        if (!allPartIds.isEmpty()) keywords.findAllById(allPartIds).forEach(k -> partById.put(k.getId(), k));
+        java.util.function.Function<Keyword, List<Keyword>> partsOf = k -> k.isMerged()
+                ? partIdsOf.getOrDefault(k.getId(), List.of()).stream().map(partById::get).filter(Objects::nonNull).toList() : List.of(k);
+        List<Keyword> fromParts = partsOf.apply(from);
+        for (PlayerKeyword row : rows) {
+            Keyword other = row.getKeyword();
+            if (other.getId().equals(fromId)) continue;
+            if (!enabled) { blocked.put(other.getId(), "지금은 합성할 수 없어요"); continue; }
+            try { checkMergeable(p, from, fromParts, other, partsOf.apply(other)); } catch (ApiException e) { blocked.put(other.getId(), e.getMessage()); }
+        }
+        return blocked;
     }
 
     @Override
@@ -910,6 +960,9 @@ public class KeywordServiceImpl implements KeywordService {
         Instant now = Instant.now(clock);
         MergePlan plan = planMerge(p, firstId, secondId, now);
         Country country = p.getCountry();
+
+        // 실패(밸런스): 결과 성에 비례한 확률로 합성이 깨져, 재료 중 점수가 낮은 쪽이 사라진다(점수가 같으면 무작위). 분해→재합성으로 보너스를 계속 뽑는 걸 막는다
+        if (ThreadLocalRandom.current().nextDouble(100) < formula.mergeFailPercent(plan.parts().size())) return failMerge(p, plan, now);
 
         // +1성 보너스(4.44): 결과 성이 높을수록 낮은 확률로, 글자 수가 허용되는 🔥활성 키워드 중 하나가 덤으로 붙는다
         Keyword bonus = null;
@@ -964,7 +1017,25 @@ public class KeywordServiceImpl implements KeywordService {
         events.publishEvent(new GameEvents.HoldingChanged(country.getId(), p.getId(), target.getId(), true));
         long gained = (newScore - p.getLevel()) - oldScore;
         return new KeywordDtos.MergeResult(myKeyword(newRow), bonus != null,
-                bonus == null ? null : partDto(bonus), gained, playerService.summary(p));
+                bonus == null ? null : partDto(bonus), gained, playerService.summary(p), false, null);
+    }
+
+    /** 합성 실패: 재료 둘 중 점수가 낮은 쪽을 보관함에서 지운다(합성 키워드면 구성 원본째 사라진다). 나머지 재료는 그대로다. 플레이어를 잠근 상태에서 부른다. */
+    private KeywordDtos.MergeResult failMerge(Player p, MergePlan plan, Instant now) {
+        long oldScore = p.getCurrentScore() - p.getLevel();
+        PlayerKeyword a = plan.rowA(), b = plan.rowB();
+        long ta = a.getKeyword().getTrendValue(), tb = b.getKeyword().getTrendValue();
+        PlayerKeyword loser = ta < tb ? a : tb < ta ? b : (ThreadLocalRandom.current().nextBoolean() ? a : b);
+        Keyword lk = loser.getKeyword();
+        KeywordDtos.LostMaterial lost = new KeywordDtos.LostMaterial(
+                lk.isMerged() ? MergeKey.display(MergeKey.sorted(keywords.findAllById(mergeParts.findPartIds(lk.getId())))) : lk.getText(), Math.max(1, lk.getStarCount()), lk.getTrendValue());
+        Long lostId = lk.getId();
+        playerKeywords.delete(loser);
+        playerKeywords.flush();
+        removeHolding(p, lostId, now); // 합성 키워드면 구성 원본의 가진 사람 수·보유 수까지 정리한다
+        keywords.flush();
+        long newScore = playerService.recompute(p);
+        return new KeywordDtos.MergeResult(null, false, null, (newScore - p.getLevel()) - oldScore, playerService.summary(p), true, lost);
     }
 
     /** +1성 보너스 후보(4.44): 같은 나라의 🔥활성 일반 키워드 중 이어 붙인 글자 수가 허용 범위 안이고 내가 (직접·합성으로) 갖고 있지 않은 것. */
