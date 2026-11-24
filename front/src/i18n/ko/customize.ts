@@ -53,4 +53,7 @@ export default {
   saveEquip: '저장하고 장착',
   equippedToast: '{slot}번 프로필을 장착했어요',
   equipThis: '이 프로필 장착',
+  levelColor: '기본 (레벨 색)',
+  levelColorNote: '기본 바탕색은 레벨에 따라 바뀌어요. 다른 색을 고르면 그 색으로 고정돼요.',
 } as Record<string, string>;
+

@@ -53,4 +53,7 @@ export default {
   saveEquip: 'Save and equip',
   equippedToast: 'Profile {slot} equipped',
   equipThis: 'Equip this profile',
+  levelColor: 'Default (level color)',
+  levelColorNote: 'The default background changes with your level. Pick another color to keep it fixed.',
 } as Record<string, string>;
+

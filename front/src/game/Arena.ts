@@ -18,6 +18,7 @@ import { HpLayer } from './arena/hp';
 import { roundRectPath } from './arena/draw';
 import { ThemeLayer, type ThemeConfig } from './theme/ThemeLayer';
 import { HitFx } from './hitFx';
+import { ensureLevelBadges, isDefaultBg, levelBadge, paintBase } from './levelBadges';
 
 /** 다른 엔티티의 최근 스냅샷들(서버 시각 ms 순). 조금 늦은 시각을 두 스냅샷 사이로 보간해 그린다. */
 interface Interp { buf: { t: number; s: EntityState }[]; cur: EntityState }
@@ -223,6 +224,7 @@ export class Arena {
   }
 
   start() {
+    void ensureLevelBadges(); // 레벨별 바탕색(DB)을 받아 둔다
     const loop = (t: number) => {
       // 그리다 오류가 나도 다음 프레임은 계속 돈다(한 번의 오류로 화면이 멈추지 않게)
       try { this.frame(t); } catch (e) { if (import.meta.env.DEV) console.error(e); }
@@ -1176,8 +1178,12 @@ export class Arena {
     if (look && !look.bot) drawLevelAura(ctx, e.x, e.y, e.r, e.level, t, 1 / this.zoom); // 레벨 등급 오라(4.40)
     this.drawDashFx(ctx, e, false); // 대시: 빛·속도선·충격파는 원 뒤(4.27)
     // 바탕색: 봇은 빨간색(4.21), 사람은 꾸민 색(10레벨부터, 4.9). 꾸미지 않았으면 성장 캐릭터의 정해진 색
-    ctx.fillStyle = look?.bot ? BOT_BASE : look?.bg ?? TURTLE_BASE;
-    ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2); ctx.fill();
+    // 꾸미지 않은 성장 캐릭터는 레벨에 따라 바탕색이 바뀐다(레벨 구간별 색, 100레벨은 무지개, 4.9). 색을 고르거나 픽셀 그림을 쓰면 그대로 쓴다
+    if (!look?.bot && !look?.art && isDefaultBg(look?.bg)) paintBase(ctx, e.x, e.y, e.r, levelBadge(e.level));
+    else {
+      ctx.fillStyle = look?.bot ? BOT_BASE : look?.bg ?? TURTLE_BASE;
+      ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2); ctx.fill();
+    }
     // 픽셀 그림(4.9)이 있으면 성장 캐릭터 대신 그린다. 아직 못 받았으면 받는 동안 거북이를 그린다
     const art = look?.art && !look.bot ? artImage(look.art) : null;
     if (art) {

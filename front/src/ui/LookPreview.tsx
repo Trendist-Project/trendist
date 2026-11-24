@@ -4,6 +4,8 @@ import { artCanvas, artPose, drawArt, turnArt, type ArtHeading } from '../game/p
 import { drawBorderEffect, drawNameTag } from '../game/skin';
 import { Trails } from '../game/trails';
 import { borderLineWidth, drawTurtle } from '../game/turtle';
+import { isDefaultBg, levelBadge, paintBase } from '../game/levelBadges';
+import { useLevelBadges } from './LevelText';
 import { t } from '../i18n';
 
 /**
@@ -18,6 +20,7 @@ export function LookPreview({ look, level, art, name, width = 300, height = 170,
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const artImg = useMemo(() => (art ? artCanvas(art.palette, art.pixels) : null), [art]);
+  const badges = useLevelBadges(); // 레벨 색을 받으면 다시 그린다
   useEffect(() => {
     const c = ref.current;
     if (!c) return;
@@ -50,8 +53,8 @@ export function LookPreview({ look, level, art, name, width = 300, height = 170,
         trails.update(1, look.trailEffect ?? null, x, y, r, now, look.background);
         trails.draw(ctx, now, dt);
       }
-      ctx.fillStyle = look.background;
-      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      if (!artImg && isDefaultBg(look.background)) paintBase(ctx, x, y, r, levelBadge(level)); // 기본 바탕의 성장 캐릭터는 그 레벨의 색(4.9)
+      else { ctx.fillStyle = look.background; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
       if (artImg) { const pose = moving && !paused ? artPose(artHeading.t, artHeading.face) : { scaleX: 1 as const, rotation: 0 }; drawArt(ctx, artImg, x, y, r, pose.scaleX, pose.rotation); }
       else drawTurtle(ctx, x, y, r, Math.max(1, Math.min(level, 10)), heading);
       const lw = borderLineWidth(r, look.borderWidth);
@@ -64,6 +67,6 @@ export function LookPreview({ look, level, art, name, width = 300, height = 170,
     };
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [look, level, artImg, name, width, height, moving, paused]);
+  }, [look, level, artImg, name, width, height, moving, paused, badges]);
   return <canvas ref={ref} className="look-preview" style={{ width, height }} aria-label={label} />;
 }

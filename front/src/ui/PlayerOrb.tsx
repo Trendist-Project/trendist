@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react';
 import { artImage, drawArt } from '../game/pixelArt';
 import { drawBorderEffect, type OrbLook } from '../game/skin';
 import { BOT_BASE, borderLineWidth, drawTurtle, TURTLE_BASE } from '../game/turtle';
+import { isDefaultBg, levelBadge, paintBase } from '../game/levelBadges';
+import { useLevelBadges } from './LevelText';
 
 /**
  * 한 플레이어·봇의 원 모양(아레나에서 보이는 그대로): 바탕색, 성장 거북이 또는 픽셀 그림, 테두리 색·두께, 테두리 효과.
@@ -9,6 +11,7 @@ import { BOT_BASE, borderLineWidth, drawTurtle, TURTLE_BASE } from '../game/turt
  */
 export function PlayerOrb({ look, level, size = 40 }: { look: OrbLook; level: number; size?: number }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const badges = useLevelBadges(); // 레벨 색을 받으면 다시 그린다
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
@@ -21,8 +24,8 @@ export function PlayerOrb({ look, level, size = 40 }: { look: OrbLook; level: nu
       ctx.clearRect(0, 0, size, size);
       const c = size / 2, r = size / 2 - Math.max(3, size * 0.12); // 테두리 효과가 둘레에 번질 자리를 남긴다
       const bg = look.bot ? BOT_BASE : look.bg ?? TURTLE_BASE;
-      ctx.fillStyle = bg;
-      ctx.beginPath(); ctx.arc(c, c, r, 0, Math.PI * 2); ctx.fill();
+      if (!look.bot && !look.art && isDefaultBg(look.bg)) paintBase(ctx, c, c, r, levelBadge(level)); // 꾸미지 않은 성장 캐릭터는 레벨 색(4.9)
+      else { ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(c, c, r, 0, Math.PI * 2); ctx.fill(); }
       const art = look.art && !look.bot ? artImage(look.art) : null;
       if (art) drawArt(ctx, art, c, c, r);
       else drawTurtle(ctx, c, c, r, Math.max(1, Math.min(level, 10)));
@@ -35,6 +38,6 @@ export function PlayerOrb({ look, level, size = 40 }: { look: OrbLook; level: nu
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [look, level, size]);
+  }, [look, level, size, badges]);
   return <canvas ref={ref} style={{ width: size, height: size, flex: 'none' }} aria-hidden="true" />;
 }

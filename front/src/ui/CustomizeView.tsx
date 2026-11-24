@@ -1,3 +1,4 @@
+import { isDefaultBg } from '../game/levelBadges';
 import { useEffect, useMemo, useState } from 'react';
 import { api, ApiFailure } from '../api/client';
 import type { EffectOption, Look, PixelArtData, ProfileBox, ProfileSlot } from '../api/types';
@@ -45,8 +46,8 @@ function lookOf(d: Draft, box: ProfileBox): Look {
 }
 
 /** 색 하나 고르기: 프리셋 칩 + 직접 입력(HEX). allowDefault면 "기본" 칩을 둔다(테두리·이름표). */
-function ColorPicker({ label, value, presets, onChange, allowDefault }: {
-  label: string; value: string | null; presets: string[]; onChange(v: string | null): void; allowDefault?: boolean;
+function ColorPicker({ label, value, presets, onChange, allowDefault, defaultLabel, note }: {
+  label: string; value: string | null; presets: string[]; onChange(v: string | null): void; allowDefault?: boolean; defaultLabel?: string; note?: string;
 }) {
   const [hex, setHex] = useState(value ?? '');
   useEffect(() => { setHex(value ?? ''); }, [value]);
@@ -56,7 +57,7 @@ function ColorPicker({ label, value, presets, onChange, allowDefault }: {
       <div className="swatches" role="radiogroup" aria-label={label}>
         {allowDefault && (
           <button type="button" role="radio" aria-checked={value === null} className={value === null ? 'swatch default on' : 'swatch default'}
-                  onClick={() => onChange(null)} title={t('customize.default')}>{t('customize.default')}</button>
+                  onClick={() => onChange(null)} title={defaultLabel ?? t('customize.default')}>{defaultLabel ?? t('customize.default')}</button>
         )}
         {presets.map((c) => (
           <button key={c} type="button" role="radio" aria-checked={value === c} aria-label={c} title={c}
@@ -68,6 +69,7 @@ function ColorPicker({ label, value, presets, onChange, allowDefault }: {
         <input value={hex} maxLength={7} placeholder="#RRGGBB" aria-label={`${label} HEX`} spellCheck={false}
                onChange={(e) => { setHex(e.target.value); if (HEX.test(e.target.value)) onChange(e.target.value.toLowerCase()); }} />
       </div>
+      {note && <p className="muted small">{note}</p>}
     </fieldset>
   );
 }
@@ -221,7 +223,9 @@ export function CustomizeView({ level, nickname, onBack, onClose }: Props) {
               {!box.canDraw && <p className="muted small">🔒 {box.drawLockReason}</p>}
             </fieldset>
 
-            <ColorPicker label={t('customize.background')} value={draft.background} presets={box.colors}
+            {/* 기본 바탕은 레벨에 따라 색이 바뀐다(레벨 구간별 색, 100레벨은 무지개). 기본 초록 칩은 "기본 (레벨 색)" 하나로 합쳤다 */}
+            <ColorPicker label={t('customize.background')} value={isDefaultBg(draft.background) ? null : draft.background} presets={box.colors.filter((c) => !isDefaultBg(c))}
+                         allowDefault defaultLabel={t('customize.levelColor')} note={t('customize.levelColorNote')}
                          onChange={(v) => setDraft({ ...draft, background: v ?? box.defaults.background })} />
             <ColorPicker label={t('customize.borderColor')} value={draft.borderColor} presets={box.colors} allowDefault
                          onChange={(v) => setDraft({ ...draft, borderColor: v })} />

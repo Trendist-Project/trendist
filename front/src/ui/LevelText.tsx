@@ -1,31 +1,18 @@
 import { Fragment, useEffect, useState } from 'react';
-import { api } from '../api/client';
-import type { LevelBadge } from '../api/types';
+import { ensureLevelBadges, levelBadges } from '../game/levelBadges';
 import { TurtleIcon } from './GrowthIcons';
 import { t } from '../i18n';
 
-/** 레벨별 아이콘 바탕은 DB(levels)에서 받아 한 번만 불러 둔다(4.9). 실패하면 다음에 다시 시도한다 */
-let badges: Map<number, LevelBadge> | null = null;
-let loading: Promise<void> | null = null;
-function loadBadges() {
-  if (!loading) {
-    loading = api.levelBadges()
-      .then((list) => { badges = new Map(list.map((b) => [b.level, b])); })
-      .catch(() => { loading = null; });
-  }
-  return loading;
-}
-
-/** 레벨별 아이콘 바탕(DB). 아직 못 받았으면 null */
+/** 레벨별 아이콘 바탕(DB, 공유 모듈 game/levelBadges). 아직 못 받았으면 null */
 export function useLevelBadges() {
-  const [, setReady] = useState(badges !== null);
+  const [, setReady] = useState(levelBadges() !== null);
   useEffect(() => {
-    if (badges) return;
+    if (levelBadges()) return;
     let alive = true;
-    loadBadges().then(() => { if (alive) setReady(true); });
+    ensureLevelBadges().then(() => { if (alive) setReady(true); });
     return () => { alive = false; };
   }, []);
-  return badges;
+  return levelBadges();
 }
 
 /** 레벨 표시: 그 레벨의 성장 거북이 아이콘(바탕색은 레벨 구간별, 100레벨은 무지개) + "prefix+숫자+suffix"(예: Lv.6). */
