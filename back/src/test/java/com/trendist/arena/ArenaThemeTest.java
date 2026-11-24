@@ -32,7 +32,7 @@ class ArenaThemeTest {
 
     @AfterEach
     void reset() {
-        set("arena_bg", "0"); set("arena_light_mode", "0"); set("arena_light_fixed", "1"); set("arena_weather_mode", "0"); set("arena_weather_fixed", "0");
+        set("arena_bg", "0"); set("arena_light_mode", "1"); set("arena_light_fixed", "1"); set("arena_weather_mode", "1"); set("arena_weather_fixed", "0"); // 새 기본값(현실 시간 자동·실제 날씨)으로 되돌린다
     }
 
     @Test
@@ -51,9 +51,9 @@ class ArenaThemeTest {
     }
 
     @Test
-    void defaultIsTheOriginalBackgroundWithoutWeather() throws Exception {
+    void defaultIsTheOriginalBackgroundWithAutoLightAndRealWeather() throws Exception {
         mvc.perform(get("/api/arena-theme")).andExpect(status().isOk())
-                .andExpect(jsonPath("$.bg").value(0)).andExpect(jsonPath("$.lightMode").value(0)).andExpect(jsonPath("$.lightFixed").value(1)).andExpect(jsonPath("$.weatherMode").value(0)).andExpect(jsonPath("$.weather").value(0))
+                .andExpect(jsonPath("$.bg").value(0)).andExpect(jsonPath("$.lightMode").value(1)).andExpect(jsonPath("$.lightFixed").value(1)).andExpect(jsonPath("$.weatherMode").value(1)).andExpect(jsonPath("$.weather").value(0))
                 .andExpect(jsonPath("$.lat").value(37.5665)).andExpect(jsonPath("$.nowMs").isNumber());
     }
 
@@ -62,7 +62,7 @@ class ArenaThemeTest {
         set("arena_bg", "21"); set("arena_light_mode", "2"); set("arena_light_fixed", "3"); set("arena_weather_mode", "2"); set("arena_weather_fixed", "3");
         mvc.perform(get("/api/arena-theme").param("country", "GLOBAL")).andExpect(status().isOk())
                 .andExpect(jsonPath("$.bg").value(21)).andExpect(jsonPath("$.lightMode").value(2)).andExpect(jsonPath("$.lightFixed").value(3))
-                .andExpect(jsonPath("$.weather").value(3)).andExpect(jsonPath("$.lat").value(51.5)).andExpect(jsonPath("$.lon").value(0.0));
+                .andExpect(jsonPath("$.weather").value(3)).andExpect(jsonPath("$.lat").value(38.9072)).andExpect(jsonPath("$.lon").value(-77.0369)); // 글로벌 기본은 미국 수도(워싱턴 D.C.)
         mvc.perform(get("/api/arena-theme").param("country", "nowhere")).andExpect(jsonPath("$.lat").value(37.5665)); // 모르는 나라는 KR
     }
 
