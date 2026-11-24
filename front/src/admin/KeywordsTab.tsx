@@ -60,7 +60,8 @@ export function KeywordsTab() {
   const refresh = (text: string) => { load(); void runLookup(text); };
   const sortBy = (key: string) => {
     if (!SORTABLE.has(key)) return;
-    setQuery((q) => ({ ...q, page: 0, sort: key, dir: q.sort === key && q.dir === 'desc' ? 'asc' : 'desc' }));
+    // 다른 열은 내림차순으로 시작, 같은 열을 다시 누르면 오름차순, 한 번 더 누르면 해제(기본 정렬: 만든 시각 내림차순)
+    setQuery((q) => (q.sort !== key ? { ...q, page: 0, sort: key, dir: 'desc' } : q.dir === 'desc' ? { ...q, page: 0, dir: 'asc' } : { ...q, page: 0, sort: 'createdAt', dir: 'desc' }));
   };
   const toggleBan = async (k: AdminKeywordRow, banned: boolean) => {
     setConfirmBan(null);

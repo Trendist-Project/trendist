@@ -57,13 +57,13 @@ export function UsersTab({ initialUserId = null, initialFilter = 'all' }: { init
   const [selected, setSelected] = useState<number | null>(initialUserId);
   const [error, setError] = useState<string | null>(null);
 
-  /** 정렬되는 열 제목. 다른 열을 누르면 내림차순으로 시작하고, 이미 고른 열을 다시 누르면 내림차순 ↔ 오름차순이 바뀐다 */
+  /** 정렬되는 열 제목. 다른 열을 누르면 내림차순으로 시작하고, 이미 고른 열을 다시 누르면 오름차순, 한 번 더 누르면 해제(기본 정렬: 최근 접속 내림차순)된다 */
   const sortTh = (k: string, children: string) => {
     const on = sort === k;
     return (
       <th key={k} className="sortable" aria-sort={on ? (dir === 'asc' ? 'ascending' : 'descending') : undefined}>
         <button type="button" className="th-sort" title={`${children} 순으로 정렬`}
-                onClick={() => { if (on) setDir((d) => (d === 'desc' ? 'asc' : 'desc')); else { setSort(k); setDir('desc'); } setPage(0); }}>
+                onClick={() => { if (on && dir === 'desc') setDir('asc'); else if (on) { setSort('seen'); setDir('desc'); } else { setSort(k); setDir('desc'); } setPage(0); }}>
           {children}<span className="th-arrow" aria-hidden="true">{on ? (dir === 'asc' ? '↑' : '↓') : '↕'}</span>
         </button>
       </th>

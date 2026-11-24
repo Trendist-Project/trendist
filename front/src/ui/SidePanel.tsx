@@ -33,12 +33,12 @@ interface Props {
 }
 
 /** 보관함 정렬 기준. 기본은 남은 시간이 많은 것부터(곧 사라질 키워드가 아래로). */
-type SortKey = 'recent' | 'text' | 'state' | 'trend' | 'remaining';
+type SortKey = 'recent' | 'text' | 'state' | 'trend' | 'remaining' | 'length';
 type SortDir = 'asc' | 'desc';
 // 칩은 이 순서로 보인다. 기본 정렬인 남은 시간을 맨 앞에, 그다음에 트렌드 점수를 둔다
-const SORT_LABEL: Record<SortKey, string> = { remaining: t('side.sortRemaining'), trend: t('side.sortTrend'), recent: t('side.sortRecent'), text: t('side.sortText'), state: t('side.sortState') };
-/** 기준을 고르면 먼저 쓰는 방향: 최신·트렌드·남은 시간은 큰 것부터, 키워드는 가나다, 상태는 🔥부터 */
-const DEFAULT_DIR: Record<SortKey, SortDir> = { recent: 'desc', text: 'asc', state: 'asc', trend: 'desc', remaining: 'desc' };
+const SORT_LABEL: Record<SortKey, string> = { remaining: t('side.sortRemaining'), trend: t('side.sortTrend'), length: t('side.sortLength'), recent: t('side.sortRecent'), text: t('side.sortText'), state: t('side.sortState') };
+/** 기준을 고르면 먼저 쓰는 방향: 최신·트렌드·남은 시간은 큰 것부터, 글자 수는 짧은 것부터, 키워드는 가나다, 상태는 🔥부터 */
+const DEFAULT_DIR: Record<SortKey, SortDir> = { recent: 'desc', text: 'asc', state: 'asc', trend: 'desc', remaining: 'desc', length: 'asc' };
 const STATE_ORDER: Record<string, number> = { 활성: 0, 비활성: 1, 금지: 2 };
 /** 합성 이름의 글자 수 한도(서버 MergeKey.MAX_TEXT_LENGTH와 같다). 어긋나도 확정할 때 서버가 막는다 */
 const MERGE_MAX_LENGTH = 20;
@@ -55,13 +55,23 @@ function loadStars(): number[] {
   return [];
 }
 
-function loadSort(): { key: SortKey; dir: SortDir } {
+/** 정렬 상태: null은 정렬 칩을 모두 끈 상태(기본 정렬인 남은 시간 많은 순으로 보인다). 칩은 누를 때마다 기본 방향 → 반대 방향 → 해제 순으로 돈다 */
+type SortState = { key: SortKey; dir: SortDir } | null;
+const DEFAULT_SORT: { key: SortKey; dir: SortDir } = { key: 'remaining', dir: 'desc' };
+const SORT_OFF = 'off';
+
+function loadSort(): SortState {
   try {
-    const v = JSON.parse(localStorage.getItem(SORT_STORE) ?? 'null');
+    const raw = localStorage.getItem(SORT_STORE);
+    if (raw === SORT_OFF) return null;
+    const v = JSON.parse(raw ?? 'null');
     if (v && v.key in SORT_LABEL && (v.dir === 'asc' || v.dir === 'desc')) return v;
   } catch { /* 기본값 */ }
-  return { key: 'remaining', dir: 'desc' };
+  return DEFAULT_SORT;
 }
+
+/** 보관함 카드의 글자 수: 서버의 합성 글자 수 한도와 같은 기준(구성 원본 이름을 구분자 없이 이은 코드포인트 수, 이름 속 띄어쓰기는 센다). 합성 카드의 이름에는 구분용 띄어쓰기가 있어 구성 이름으로 센다 */
+const mineLength = (k: MyKeyword) => [...(k.merged && k.parts.length > 0 ? k.parts.map((p) => p.text).join('') : k.text)].length;
 
 function sortMine(list: MyKeyword[], key: SortKey, dir: SortDir) {
   const sign = dir === 'asc' ? 1 : -1;
@@ -71,6 +81,7 @@ function sortMine(list: MyKeyword[], key: SortKey, dir: SortDir) {
       case 'text': return a.text.localeCompare(b.text, getLang());
       case 'state': return (STATE_ORDER[a.state] ?? 9) - (STATE_ORDER[b.state] ?? 9);
       case 'trend': return Number(a.trendValue) - Number(b.trendValue);
+      case 'length': return mineLength(a) - mineLength(b);
       case 'remaining': return time(a.expiresAt) - time(b.expiresAt);
       default: return time(a.plusedAt) - time(b.plusedAt);
     }
@@ -140,7 +151,7 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
   // 모바일 하단 시트: 접혀 있으면 탭 줄만 보인다. 탭을 누르면 펼치고, 펼친 탭을 다시 누르면 접는다(데스크톱은 늘 펼침)
   const [expanded, setExpanded] = useState(false);
   const sideRef = useRef<HTMLElement>(null);
-  const [sort, setSort] = useState(loadSort);
+  const [sort, setSort] = useState<SortState>(loadSort);
   const [mins, setMins] = useState<number[]>(DEFAULT_GRADE_MINS); // 카드 등급 기준(4.42)
   const [fail, setFail] = useState<{ per: number; max: number } | null>(null); // 합성 실패 확률 기준(성당 %, 상한 %)
   useEffect(() => { api.keywordGrades().then((g) => { if (Array.isArray(g.mins) && g.mins.length === 5) setMins(g.mins); if (typeof g.mergeFailPerStar === 'number') setFail({ per: g.mergeFailPerStar, max: g.mergeFailMax }); }).catch(() => { /* 기본 기준 */ }); }, []);
@@ -152,7 +163,7 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
   }, [mine]);
   // 보관함에 없는 성이 골라져 있으면(합성·만료로 사라짐) 필터에서 뺀다. 고른 성이 모두 사라지면 전체로 돌아간다
   const activeStars = useMemo(() => starFilter.filter((n) => starCounts.some(([s]) => s === n)), [starFilter, starCounts]);
-  const sortedMine = useMemo(() => sortMine(mine, sort.key, sort.dir).filter((k) => activeStars.length === 0 || activeStars.includes(k.stars)), [mine, sort, activeStars]);
+  const sortedMine = useMemo(() => sortMine(mine, (sort ?? DEFAULT_SORT).key, (sort ?? DEFAULT_SORT).dir).filter((k) => activeStars.length === 0 || activeStars.includes(k.stars)), [mine, sort, activeStars]);
 
   // ---- 키워드 합성(4.44): 드래그(마우스)와 [🔗] 탭, 확정 전 미리보기, 합쳐지는 연출
   const [mergeFrom, setMergeFrom] = useState<number | null>(null); // 합성 모드: 이 카드와 합칠 짝을 고른다
@@ -273,7 +284,7 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
   }
 
   useEffect(() => {
-    try { localStorage.setItem(SORT_STORE, JSON.stringify(sort)); } catch { /* 이 브라우저에만 기억 */ }
+    try { localStorage.setItem(SORT_STORE, sort ? JSON.stringify(sort) : SORT_OFF); } catch { /* 이 브라우저에만 기억 */ }
   }, [sort]);
   useEffect(() => {
     try { localStorage.setItem(STAR_STORE, JSON.stringify(starFilter)); } catch { /* 이 브라우저에만 기억 */ }
@@ -404,14 +415,14 @@ export function SidePanel({ onPlused, onMerged, onError, refreshKey, onOpenKeywo
               {/* 기준을 누르면 그 기준으로, 이미 고른 기준을 다시 누르면 방향을 바꾼다 */}
               <ScrollRow className="sort-chips" role="group" aria-label={t('side.sortGroup')}>
                 {(Object.keys(SORT_LABEL) as SortKey[]).map((k) => {
-                  const active = sort.key === k;
+                  const active = sort?.key === k;
                   return (
                     <button key={k} className={active ? 'sort-chip active' : 'sort-chip'} aria-pressed={active}
-                            title={active ? t('side.sortFlip') : undefined}
-                            aria-label={active ? t('side.sortActiveAria', { label: SORT_LABEL[k], dir: sort.dir === 'asc' ? t('side.asc') : t('side.desc') }) : t('side.sortByAria', { label: SORT_LABEL[k] })}
-                            onClick={() => setSort((s) => (s.key === k ? { key: k, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key: k, dir: DEFAULT_DIR[k] }))}>
+                            title={active ? (sort?.dir === DEFAULT_DIR[k] ? t('side.sortFlip') : t('side.sortOff')) : undefined}
+                            aria-label={active ? t('side.sortActiveAria', { label: SORT_LABEL[k], dir: sort?.dir === 'asc' ? t('side.asc') : t('side.desc') }) : t('side.sortByAria', { label: SORT_LABEL[k] })}
+                            onClick={() => setSort((s) => (s?.key !== k ? { key: k, dir: DEFAULT_DIR[k] } : s.dir === DEFAULT_DIR[k] ? { key: k, dir: s.dir === 'asc' ? 'desc' : 'asc' } : null))}>
                       {SORT_LABEL[k]}
-                      {active && <span className="sort-arrow" aria-hidden="true">{sort.dir === 'asc' ? '↑' : '↓'}</span>}
+                      {active && <span className="sort-arrow" aria-hidden="true">{sort?.dir === 'asc' ? '↑' : '↓'}</span>}
                     </button>
                   );
                 })}
@@ -489,8 +500,7 @@ function MineCard({ k, mins, role, reason, failPct, over, merging, fresh, mode, 
   const cls = ['mine-item', 'mine-card', tone, `tier${tier}`, k.merged && 'merged', role && `merge-${role}`, over && 'merge-over',
     merging && `merging${merging === 'bonus' ? ' bonus' : ''}`, fresh && `merge-fresh${fresh === 'bonus' ? ' bonus' : ''}`].filter(Boolean).join(' ');
   const inactive = k.state !== '활성';
-  // 서버의 합성 글자 수 한도와 같은 기준: 구성 원본 이름을 구분자 없이 이은 글자 수(이름 속 띄어쓰기는 센다). 합성 카드의 이름에는 구분용 띄어쓰기가 있어 구성 이름으로 센다
-  const len = [...(k.merged && k.parts.length > 0 ? k.parts.map((p) => p.text).join('') : k.text)].length;
+  const len = mineLength(k);
   return (
     <li className={cls} data-mine-id={k.keywordId} title={reason ?? undefined}>
       <button className="mine-open" onClick={mode ? onPick : onOpen} onPointerDown={onDragStart}
