@@ -1,4 +1,5 @@
 import { mineBus, type MineEvent } from './mineBus';
+import { setLeaderboard } from './leaderboardStore';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import type { EmergencyNotice, PlayerSummary } from '../api/types';
 import type { Arena } from '../game/Arena';
@@ -176,6 +177,7 @@ export function handleGameMessage(m: ServerMessage, c: GameMessageContext) {
     case 'score': // 점수 메시지가 잇따라 와도 0.15초에 한 번만 화면에 반영한다(맨 처음 것은 바로, 그 사이 온 것은 마지막 값만)
       pushScore(m, setPlayer);
       break;
+    case 'leaderboard': setLeaderboard({ top: m.top, me: m.me }); break; // 실시간 랭킹은 소켓으로 받는다(조회하지 않는다)
     case 'pong': {
       const ms = performance.now() - m.t;
       arena.updateRtt(ms);

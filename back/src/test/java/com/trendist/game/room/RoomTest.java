@@ -63,6 +63,21 @@ class RoomTest {
     }
 
     @Test
+    void leaderboardIsPushedOverTheSocketEveryTwoSecondsWithMyRank() {
+        // 실시간 랭킹: 접속 중인 사람의 TOP과 각자의 내 순위를 2초(40틱)마다 소켓으로 보낸다. 조회 요청이 필요 없다
+        Out out = new Out();
+        Room r = skillRoom(out, SkillConfig.DEFAULT);
+        Room.Member a = r.join(1, "s1", "가", 1, 5, List.of());
+        Room.Member b = r.join(2, "s2", "나", 1, 50, List.of());
+        for (int i = 0; i < 20 * 5; i++) r.tick(); // 5초
+        var boards = out.texts.stream().filter(m -> "leaderboard".equals(m.get("type"))).toList();
+        assertThat(boards).isNotEmpty();
+        @SuppressWarnings("unchecked") var top = (List<Map<String, Object>>) boards.get(boards.size() - 1).get("top");
+        assertThat(top).extracting(e -> e.get("nickname")).containsExactly("나", "가"); // 점수 높은 순
+        assertThat(top.get(0).get("rank")).isEqualTo(1);
+    }
+
+    @Test
     void comboExpiresAfterMaxSecondsAndEachNewComboRestartsTheTime() {
         // 4.25: 콤보 유지시간: 마지막으로 콤보가 오른 때부터 maxSeconds가 지나면 연속 횟수와 불꽃이 사라진다(expired). 콤보가 추가될 때마다 다시 시작한다. 0이면 제한 없음
         Out out = new Out();

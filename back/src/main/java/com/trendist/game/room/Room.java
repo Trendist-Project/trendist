@@ -754,6 +754,7 @@ public class Room {
             Map<Long, Live> view = new HashMap<>();
             for (Member m : members.values()) if (!m.bot) view.put(m.playerId, new Live(m.playerId, m.entityNo, m.nickname, m.level, m.score)); // 랭킹·정보 팝업은 사람만
             liveView = view;
+            if (tick % 40 == 0) sendLeaderboard(view); // 2초마다 실시간 랭킹을 소켓으로 밀어 준다(화면이 따로 조회하지 않아도 된다)
         }
     }
 
@@ -1890,6 +1891,31 @@ public class Room {
         byte[] bytes = buf.array();
         for (Member m : members.values()) outbox.send(m, ByteBuffer.wrap(bytes));
         for (Member sp : spectators) outbox.send(sp, ByteBuffer.wrap(bytes));
+    }
+
+    /**
+     * 리더보드(실시간 랭킹): 접속 중인 사람(봇 제외)의 점수 TOP 10과 각자의 내 순위를 모든 접속자에게 보낸다. 방 메모리 값으로만 계산해 DB를 쓰지 않는다.
+     * 화면이 5초마다 조회하던(/api/rankings, /api/rankings/me) 것을 대신해 조회 요청이 사라지고, 2초마다 같은 값이 한꺼번에 도착한다.
+     */
+    private void sendLeaderboard(Map<Long, Live> view) {
+        List<Live> sorted = view.values().stream().sorted(Comparator.comparingDouble(Live::score).reversed().thenComparingLong(Live::playerId)).toList();
+        List<Map<String, Object>> top = new ArrayList<>();
+        Map<Long, Map<String, Object>> entryOf = new HashMap<>();
+        for (int i = 0; i < sorted.size(); i++) {
+            Live l = sorted.get(i);
+            Map<String, Object> e = Map.of("rank", i + 1, "playerId", l.playerId(), "nickname", l.nickname(), "level", l.level(), "score", Math.round(l.score()));
+            entryOf.put(l.playerId(), e);
+            if (i < 10) top.add(e);
+        }
+        for (Member m : members.values()) {
+            if (m.bot) continue;
+            Map<String, Object> msg = new HashMap<>();
+            msg.put("type", "leaderboard"); msg.put("top", top); msg.put("me", entryOf.get(m.playerId)); // me는 접속 중이 아니면 null
+            outbox.sendText(m, msg);
+        }
+        Map<String, Object> forSpectators = new HashMap<>();
+        forSpectators.put("type", "leaderboard"); forSpectators.put("top", top); forSpectators.put("me", null);
+        for (Member sp : spectators) outbox.sendText(sp, forSpectators);
     }
 
     private Map<String, Object> rosterMessage() {

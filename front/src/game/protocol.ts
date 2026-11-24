@@ -134,6 +134,7 @@ export type MonsterMessage =
 
 export type ServerMessage =
   | MonsterMessage
+  | { type: 'leaderboard'; top: import('../api/types').RankingEntry[]; me: import('../api/types').RankingEntry | null } // 실시간 랭킹(2초마다): 접속 중인 사람 TOP 10과 내 순위
   | { type: 'spectating'; country: string; spectators: number } // 관전 접속이 받아들여짐(관리자 관전, 13.13)
   | { type: 'welcome'; entityNo: number; playerId: number; x: number; y: number; score: number; level: number }
   | ({ type: 'tuning' } & Tuning)

@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
-import { visibleInterval } from './visibleInterval';
-import type { RankingEntry } from '../api/types';
+import { getLeaderboard, setLeaderboard, useLeaderboard } from './leaderboardStore';
 import { fmtNumber, t } from '../i18n';
 
-const REFRESH_MS = 5_000; // 접속자 점수는 방 메모리 값이라 자주 바뀐다. 켜져 있는 동안만 다시 읽는다
 const TOP = 10;          // 서버가 주는 순위 수(최대)
 const MAX_LINES = 11;    // 저장하는 줄 수의 상한(TOP 10 + 내 순위 한 줄)
 const MIN_LINES = 3;     // 최소 3줄(내 순위 포함): 내가 1등이 아니어도 내 순위가 항상 보이게
@@ -17,28 +15,26 @@ const loadLines = () => {
 interface Props { myPlayerId: number }
 
 /**
- * 리더보드(4.14): 지금 이 나라 방에 접속한 사람의 현재 유행도 순위. 서버는 TOP 10을 주고, 화면 영역(줄 수 N)은 아래 손잡이를 끌어 사람마다 줄이거나 늘린다.
+ * 리더보드(4.14): 지금 이 나라 방에 접속한 사람의 현재 유행도 순위(서버가 소켓으로 2초마다 보낸다). 서버는 TOP 10을 주고, 화면 영역(줄 수 N)은 아래 손잡이를 끌어 사람마다 줄이거나 늘린다.
  * - 최대는 내가 10위 안이면 10줄, 11위 아래면 11줄(10위 + 내 순위 한 줄)이고, 최소는 3줄이다(내 순위 포함, 1등이 아니어도 내 순위가 항상 보이게).
  * - 영역 N줄 안에는 항상 내 순위가 있다: 내가 N위 안이면 1~N위(내 줄 강조, 아래에 또 보이지 않음), 아니면 1~(N-1)위 + 맨 아래 내 순위 한 줄.
  *   예) N=4에 내가 15위 → 1~3위 + 내 순위, N=3에 내가 3위 → 1~3위.
  */
 export function Leaderboard({ myPlayerId }: Props) {
-  const [ranking, setRanking] = useState<RankingEntry[] | null>(null);
-  const [mine, setMine] = useState<RankingEntry | null>(null);
+  const board = useLeaderboard(); // 서버가 소켓으로 2초마다 보내 주는 값(leaderboard 메시지)
+  const ranking = board?.top ?? null;
+  const mine = board?.me ?? null;
   const [lines, setLines] = useState(loadLines);
   const drag = useRef<{ y: number; n: number } | null>(null);
 
+  // 소켓 값이 처음 오기까지(최대 2초)만 한 번 조회해 빈 칸을 채운다. 그 뒤로는 조회하지 않는다
   useEffect(() => {
+    if (getLeaderboard() !== null) return;
     let alive = true;
-    const load = async () => {
-      try {
-        const [r, m] = await Promise.all([api.rankings(), api.myRank().catch(() => null)]);
-        if (alive) { setRanking(r); setMine(m); }
-      } catch { /* 다음에 다시 */ }
-    };
-    load();
-    const stop = visibleInterval(load, REFRESH_MS);
-    return () => { alive = false; stop(); };
+    Promise.all([api.rankings(), api.myRank().catch(() => null)])
+      .then(([top, me]) => { if (alive && getLeaderboard() === null) setLeaderboard({ top, me }); })
+      .catch(() => { /* 소켓 값이 올 때까지 비어 있다 */ });
+    return () => { alive = false; };
   }, []);
 
   const save = (n: number) => { try { localStorage.setItem(LINES_KEY, String(n)); } catch { /* 저장 못 해도 된다 */ } };
