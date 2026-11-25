@@ -70,6 +70,7 @@ public class KeywordServiceImpl implements KeywordService {
     private final CountryService countries;
     private final Clock clock;
     private final com.trendist.stats.support.ActivityCounter activity;
+    private final com.trendist.keyword.worker.KeywordWorkers workers; // + 의 키워드 워커(2a)
 
     /** 트렌드 값이 바뀐 키워드. 1분 잡이 보유자 점수를 DB에서 다시 합산한다(9.4). */
     private final Set<Long> dirtyKeywords = ConcurrentHashMap.newKeySet();
@@ -112,32 +113,46 @@ public class KeywordServiceImpl implements KeywordService {
 
     // ---------------------------------------------------------------- +
 
+    /** 키워드 워커에서 + 를 기다리는 상한. 넘으면 KEYWORD_BUSY(클라이언트가 다시 시도할 수 있다). */
+    static final Duration PLUS_WAIT = Duration.ofSeconds(2);
+
+    /**
+     * +(2a, docs/plans/keyword-worker.md): + 한 번의 트랜잭션 전체를 키워드(정규화 이름)의 워커 스레드에서 실행한다.
+     * 같은 이름의 요청은 같은 워커에서 줄을 서므로 키워드 행을 잠그지 않고도 중복 검사와 생성이 직렬로 된다.
+     * 플레이어 행은 기존처럼 잠근다. 트랜잭션이 하나라서 보상 처리는 필요 없다.
+     */
     @Override
-    @Transactional
     public KeywordDtos.PlusResult plus(long userId, String rawText) {
         Player found = playerService.requireCurrent(userId);
-        Player p = players.findByIdForUpdate(found.getId()).orElseThrow(); // 잠금 순서: 플레이어 → 키워드
         String text = KeywordNormalizer.display(rawText);
         String normalized = KeywordNormalizer.validate(text);
+        long playerId = found.getId();
+        String requestId = java.util.UUID.randomUUID().toString();
+        return workers.call(normalized.hashCode(), () -> tx.execute(st -> plusInLane(playerId, text, normalized, requestId)), PLUS_WAIT);
+    }
+
+    /** +의 본체: 보관함에 넣고 인원·EXP·트렌드 값·점수를 고친다. 호출하는 쪽이 플레이어와 키워드 행을 잠근 상태에서 부른다(합성 경로). */
+    private KeywordDtos.PlusResult addHolding(Player p, Keyword k, Optional<PlayerKeyword> existing, Instant now) {
+        Added a = addHoldingCore(p, k, existing, now);
+        return new KeywordDtos.PlusResult(card(k, p, now), a.gained(), playerService.summary(p));
+    }
+
+    /** +의 본체(워커 스레드, 트랜잭션 안). 키워드 행을 잠그지 않는다: 같은 이름의 요청은 이 워커에서만 처리된다. */
+    private KeywordDtos.PlusResult plusInLane(long playerId, String text, String normalized, String requestId) {
+        Player p = players.findByIdForUpdate(playerId).orElseThrow();
         Instant now = Instant.now(clock);
         Country country = p.getCountry();
         if (bannedWords.contains(country.getCode(), normalized)) throw ApiException.badRequest("KEYWORD_BANNED", "검색할 수 없는 키워드예요"); // 금지어가 들어 있으면 만들지도 않는다
 
         Keyword k = keywords.findByCountryIdAndNormalized(country.getId(), normalized)
                 .orElseGet(() -> createKeyword(country, text, normalized, externalConfirm(country.getCode(), normalized), now));
-        k = keywords.findByIdForUpdate(k.getId()).orElseThrow();
         if (isBanned(k)) throw ApiException.badRequest("KEYWORD_BANNED", "검색할 수 없는 키워드예요");
 
         Optional<PlayerKeyword> existing = holdings.findByPlayerIdAndKeywordId(p.getId(), k.getId());
         if (existing.isPresent() && !existing.get().isExpired(now)) throw ApiException.conflict("ALREADY_PLUSED", "이미 보유중인 키워드예요");
         if (covering(p.getId(), k.getId(), now).isPresent()) throw ApiException.conflict("ALREADY_PLUSED", "이미 보유중인 키워드예요"); // 합성 키워드로 가진 원본(4.44)
         activity.add(country.getId(), com.trendist.stats.support.ActivityCounter.Kind.PLUS); // 사이트 통계(13.9)
-        return addHolding(p, k, existing, now);
-    }
-
-    /** +의 본체: 보관함에 넣고 인원·EXP·트렌드 값·점수를 고친다. 플레이어와 키워드 행을 잠근 상태에서 부른다. */
-    private KeywordDtos.PlusResult addHolding(Player p, Keyword k, Optional<PlayerKeyword> existing, Instant now) {
-        Added a = addHoldingCore(p, k, existing, now);
+        Added a = addHoldingCore(p, k, existing, now, requestId);
         return new KeywordDtos.PlusResult(card(k, p, now), a.gained(), playerService.summary(p));
     }
 
@@ -146,6 +161,11 @@ public class KeywordServiceImpl implements KeywordService {
 
     /** 키워드를 보관함에 더하고 점수·이벤트를 처리한다. 카드·요약은 만들지 않아(구슬처럼 값만 필요한 곳은 이 값으로 충분하다) 조회가 적다. */
     private Added addHoldingCore(Player p, Keyword k, Optional<PlayerKeyword> existing, Instant now) {
+        return addHoldingCore(p, k, existing, now, null);
+    }
+
+    /** requestId는 보관함 행에 남긴다(추적용, null이면 남기지 않는다). */
+    private Added addHoldingCore(Player p, Keyword k, Optional<PlayerKeyword> existing, Instant now, String requestId) {
         Instant expires = now.plus(Duration.ofHours(settings.getInt(SettingKeys.PLUS_TTL_HOURS)));
         Country country = p.getCountry();
         long oldTrend = k.getTrendValue();
@@ -153,9 +173,10 @@ public class KeywordServiceImpl implements KeywordService {
         boolean newHolder;
         if (existing.isPresent()) {
             existing.get().renew(now, expires); // 만료 행 재사용: 가진 사람 수는 그대로
+            if (requestId != null) existing.get().withRequest(requestId);
             newHolder = false;
         } else {
-            holdings.save(new PlayerKeyword(p, k, now, expires));
+            holdings.save(new PlayerKeyword(p, k, now, expires).withRequest(requestId));
             k.incHolder();
             p.incHold();
             newHolder = true;

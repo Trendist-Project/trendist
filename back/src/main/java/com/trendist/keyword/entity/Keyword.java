@@ -15,6 +15,8 @@ import lombok.NoArgsConstructor;
 @Table(name = "keywords",
         uniqueConstraints = @UniqueConstraint(name = "uk_keywords_country_normalized", columnNames = {"country_id", "normalized"}),
         indexes = @Index(name = "idx_keywords_state", columnList = "country_id, keyword_state_id, trend_value"))
+// 바뀐 열만 UPDATE한다. + 는 키워드 행을 잠그지 않고 워커에서 처리하므로(KeywordServiceImpl.plus), 읽은 뒤 다른 경로가 고친 열을 덮어쓰지 않게 한다
+@org.hibernate.annotations.DynamicUpdate
 @jakarta.persistence.Cacheable
 @org.hibernate.annotations.Cache(usage = org.hibernate.annotations.CacheConcurrencyStrategy.READ_WRITE) // 엔티티 2차 캐시(application.yml, 켜져 있을 때만)
 public class Keyword extends BaseTimeEntity {

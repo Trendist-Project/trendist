@@ -9,6 +9,7 @@ import com.trendist.keyword.service.KeywordService;
 import com.trendist.player.service.LevelService;
 import com.trendist.setting.service.SettingService;
 import com.trendist.setting.support.SettingKeys;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.nio.ByteBuffer;
 import java.util.Collection;
@@ -34,13 +35,46 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     private final Map<Long, Room> rooms = new ConcurrentHashMap<>();
     private final Map<Long, ScheduledExecutorService> tickers = new ConcurrentHashMap<>();
     private final ScheduledExecutorService tuningRefresher = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "room-tuning"));
-    private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor(); // DB·외부 호출은 틱 밖에서
     /**
      * 방의 DB 작업(키워드 빼앗기·잃기, 처치 기록, 구슬 보상 등)이 동시에 쓰는 DB 연결 수 상한. 방의 작업이 연결 풀을 다 쥐면
      * HTTP 요청이 연결을 얻지 못하므로 HTTP 몫을 남기려는 제한이다. 칭호 검사는 커밋 뒤 별도 스레드가 하므로(TitleServiceImpl.on)
-     * 작업이 두 번째 연결을 요구하지 않아 교착은 생기지 않는다. 넘치는 작업은 가상 스레드에서 차례를 기다린다(방 틱은 막히지 않는다).
+     * 작업이 두 번째 연결을 요구하지 않아 교착은 생기지 않는다.
+     * 작업은 하나의 FIFO 큐에 넣고, 이 개수만큼의 전용 스레드가 차례로 꺼내 실행한다(방 틱은 막히지 않는다).
+     * 큐가 길어지면 경고를 남긴다(작업을 버리지는 않는다: 킬·빼앗기 기록은 유실하면 안 된다).
      */
-    private final java.util.concurrent.Semaphore dbSlots = new java.util.concurrent.Semaphore(4);
+    static final int DB_CONCURRENCY = 4;
+    private static final int DB_DEPTH_WARN = 500;
+    private static final long DB_DEPTH_WARN_INTERVAL_MS = 10_000;
+    private final BlockingQueue<Runnable> dbQueue = new LinkedBlockingQueue<>();
+    private final Thread[] dbThreads = new Thread[DB_CONCURRENCY];
+    private volatile long lastDepthWarnMillis;
+
+    @PostConstruct
+    void startDbWorkers() {
+        for (int i = 0; i < DB_CONCURRENCY; i++) {
+            Thread t = new Thread(this::dbLoop, "room-db-" + (i + 1));
+            t.setDaemon(true);
+            dbThreads[i] = t;
+            t.start();
+        }
+    }
+
+    private void dbLoop() {
+        while (!Thread.currentThread().isInterrupted()) {
+            Runnable task;
+            try {
+                task = dbQueue.take();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            try {
+                task.run();
+            } catch (Throwable t) { // 한 작업의 실패로 워커 스레드가 죽으면 뒤의 작업이 모두 멈추므로 여기서 막는다
+                log.warn("room DB task failed", t);
+            }
+        }
+    }
 
     private void db(Runnable task) { db("db", task); }
 
@@ -48,18 +82,22 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     private void db(String name, Runnable task) {
         long queuedAt = System.nanoTime();
         perf.dbEnqueued();
-        workers.submit(() -> {
-            dbSlots.acquireUninterruptibly();
+        dbQueue.add(() -> {
             long start = System.nanoTime();
             int sql0 = com.trendist.perf.SqlCounter.count();
             com.trendist.perf.SqlCounter.clearKinds();
             perf.dbStarted();
             try { task.run(); } finally {
-                dbSlots.release();
                 perf.dbFinished();
                 perf.record("db " + name, start - queuedAt, System.nanoTime() - start, com.trendist.perf.SqlCounter.count() - sql0, com.trendist.perf.SqlCounter.takeKinds());
             }
         });
+        int depth = dbQueue.size();
+        long now = System.currentTimeMillis();
+        if (depth >= DB_DEPTH_WARN && now - lastDepthWarnMillis >= DB_DEPTH_WARN_INTERVAL_MS) {
+            lastDepthWarnMillis = now;
+            log.warn("room DB queue depth {} (workers {}): DB 작업이 밀리고 있다", depth, DB_CONCURRENCY);
+        }
     }
     private final com.trendist.perf.PerfProbe perf; // 성능 계측(로컬 점검용, 꺼져 있으면 기록하지 않는다)
     private final SettingService settings;
@@ -732,6 +770,6 @@ public class RoomManagerImpl implements RoomManager, Room.Outbox {
     public void shutdown() {
         tickers.values().forEach(ExecutorService::shutdownNow);
         tuningRefresher.shutdownNow();
-        workers.shutdownNow();
+        for (Thread t : dbThreads) if (t != null) t.interrupt();
     }
 }

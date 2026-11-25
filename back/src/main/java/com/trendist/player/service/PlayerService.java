@@ -52,6 +52,9 @@ public interface PlayerService {
     /** 공격에 성공했다(4.3): 빼앗은 횟수 +1(불꽃으로 키워드를 모두 잃게 해도 1). 칭호를 확인한다. 방(틱) 밖의 작업 스레드에서 부른다. */
     void recordSteal(long playerId);
 
+    /** 메모리 플러시: 모아 둔 킬·빼앗기 수와 EXP를 한 트랜잭션에서 반영하고 점수·레벨을 한 번 다시 정한다(1분 주기, player/memory). */
+    void applyBufferedCounters(long playerId, long kills, long steals, long exp);
+
     /** 행을 이미 잠근 트랜잭션 안에서: 공격 성공 1회(빼앗은 횟수 +1, EXP `attack_exp`)를 반영하고 점수·레벨을 다시 정한다(4.3). */
     void awardAttack(Player p);
 

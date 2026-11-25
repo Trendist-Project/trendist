@@ -445,6 +445,7 @@ CREATE TABLE player_keywords (
   expires_at DATETIME(6) NOT NULL COMMENT '삭제 시각(created_at + 24시간)',
   created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) COMMENT '+ 시각(만료 행을 재사용하면 새 + 시각으로 갱신)',
   updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6) COMMENT '수정 시각(만료 행 재사용)',
+  request_id VARCHAR(36) NULL COMMENT '이 행을 만든 + 요청 번호(추적용, V86)',
   PRIMARY KEY (id),
   UNIQUE KEY uk_player_keywords (player_id, keyword_id),
   KEY idx_player_keywords_keyword (keyword_id),

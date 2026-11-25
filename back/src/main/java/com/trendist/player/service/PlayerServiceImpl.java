@@ -43,6 +43,8 @@ public class PlayerServiceImpl implements PlayerService {
     private final com.trendist.profile.support.ProfileLooks looks;
     private final Clock clock;
     private final com.trendist.stats.support.ActivityCounter activity;
+    private final com.trendist.player.memory.PlayerCounterBuffer counterBuffer;
+    private final org.springframework.transaction.support.TransactionTemplate tx;
 
     @Override
     @Transactional(readOnly = true)
@@ -126,16 +128,39 @@ public class PlayerServiceImpl implements PlayerService {
         return p.getNicknameChangedAt().plus(Duration.ofMinutes(settings.getInt(SettingKeys.NICKNAME_CHANGE_MINUTES)));
     }
 
+    /**
+     * 킬(4.31). 메모리 버퍼가 켜져 있으면 행을 잠그지 않고 버퍼에만 쌓는다(1분마다 applyBufferedCounters가 반영).
+     * 꺼져 있으면 지금까지처럼 행을 잠그고 바로 반영한다. 트랜잭션은 DB를 쓸 때만 연다.
+     */
     @Override
-    @Transactional
     public void recordKill(long playerId) {
-        players.findByIdForUpdate(playerId).ifPresent(this::awardKill);
+        if (counterBuffer.enabled()) {
+            counterBuffer.addKill(playerId, settings.getInt(SettingKeys.KILL_EXP));
+            return;
+        }
+        tx.executeWithoutResult(s -> players.findByIdForUpdate(playerId).ifPresent(this::awardKill));
     }
 
+    /** 공격 성공(4.3). 킬과 같은 방식으로 버퍼를 쓴다. */
+    @Override
+    public void recordSteal(long playerId) {
+        if (counterBuffer.enabled()) {
+            counterBuffer.addSteal(playerId, settings.getInt(SettingKeys.ATTACK_EXP));
+            return;
+        }
+        tx.executeWithoutResult(s -> players.findByIdForUpdate(playerId).ifPresent(this::awardAttack));
+    }
+
+    /** 플러시: 모아 둔 값을 행 하나에 한 번에 더하고, 점수·레벨을 한 번만 다시 정한다. 행이 없으면(탈퇴 등) 버린다. */
     @Override
     @Transactional
-    public void recordSteal(long playerId) {
-        players.findByIdForUpdate(playerId).ifPresent(this::awardAttack);
+    public void applyBufferedCounters(long playerId, long kills, long steals, long exp) {
+        players.findByIdForUpdate(playerId).ifPresent(p -> {
+            p.addKills(kills);
+            p.addSteals(steals);
+            if (exp > 0) p.addExp(exp);
+            recompute(p);
+        });
     }
 
     @Override

@@ -36,6 +36,8 @@ trendist:
   # 서버 1대 기준이며, 강제 종료(kill -9·전원)하면 마지막 1분 치 변화가 사라진다. 끄려면 두 값을 false로
   memory-holdings: true
   memory-counters: true
+  # 킬·빼앗기 기록은 메모리에 모았다가 1분마다 플레이어당 한 트랜잭션으로 반영한다(player/memory). 강제 종료하면 마지막 1분 치가 사라진다. 끄려면 false
+  memory-player-counters: true
   cookie:
     secure: true
   # 키워드 AI 한 줄 설명용 제미나이 API 키(운영, 4.12)

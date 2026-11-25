@@ -28,6 +28,8 @@ spring:
 
 # 키워드 AI 한 줄 설명용 제미나이 API 키(로컬, 4.12). 없으면 기능이 꺼진다
 trendist:
+  # 킬·빼앗기 기록을 메모리에 모았다가 1분마다 DB에 반영(player/memory). 강제 종료 시 마지막 1분 치가 사라진다. 운영(application-prod.yml)도 켜져 있다
+  memory-player-counters: true
   perf:
     enabled: true      # 성능 계측 로그([perf], 10초마다 요약). 느린 작업은 바로 WARN
     slow-ms: 300

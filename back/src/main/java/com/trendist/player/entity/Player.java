@@ -95,6 +95,9 @@ public class Player extends BaseTimeEntity {
     public void incOrb() { this.orbCount++; }
     public void incLose() { this.loseCount++; }
     public void incKill() { this.killCount++; }
+    /** 메모리에 모은 킬·빼앗기 수를 한꺼번에 더한다(player/memory 플러시, 정확히 한 번만 호출) */
+    public void addKills(long n) { this.killCount += n; }
+    public void addSteals(long n) { this.stealCount += n; }
     public void incBossKill() { this.bossKillCount++; }
     /** 활성 칭호(4.10). null이면 숨김. 가진 칭호인지는 서비스가 확인한다. */
     public void changeTitle(Long titleId) { this.titleId = titleId; }
